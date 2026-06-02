@@ -1,4 +1,4 @@
-# CodecMedia (Work in Progress)
+# CodecMedia
 
 [![npm version](https://img.shields.io/npm/v/codecmedia.svg)](https://www.npmjs.com/package/codecmedia)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -6,95 +6,130 @@
 [![npm](https://img.shields.io/badge/npm-9%2B-CB3837?logo=npm&logoColor=white)](https://www.npmjs.com/)
 [![Java Version](https://img.shields.io/badge/Java%20Version-codecmedia--java-007396?logo=openjdk&logoColor=white)](https://github.com/TamKungZ/codecmedia-java)
 
-**Raw port from Java (incomplete)**
+CodecMedia is a pure Node.js port of the CodecMedia Java engine. It provides synchronous media probing, validation, metadata sidecar persistence, limited embedded metadata reads, dry-run playback workflow support, and lightweight conversion routing.
 
-CodecMedia is a Node.js port of the original CodecMedia Java engine for media probing, validation, metadata sidecar persistence, audio extraction, playback workflow simulation, and conversion routing.
-
-## Project Status (Important)
-
-- Current npm release: **1.1.5**
-- This npm package is still in active development and **not all media files/formats are supported yet**.
-- **WebM, WAV, and MP4 support are currently under testing** and may change.
-- **Conversion/transcoding is not fully supported yet** (current routes are limited and mostly placeholder behavior).
-- The Node.js implementation is an **incomplete port from the Java version**.
+The package is still a work in progress. It aims to mirror `codecmedia-java` where Java behavior can be reasonably implemented in npm without native dependencies or external binaries.
 
 <p align="center">
   <img src="https://codecmedia.tamkungz.me/CodecMedia_Full_Logo.png" width="70%" alt="CodecMedia Logo">
 </p>
 
-## Approaches
-- Zero-Dependency
-- Self-Contained
-- Multi-Platform
+## Status
 
-## Repository Layout
+- Current npm package version: `1.1.5`
+- Runtime: Node.js 18+
+- Core implementation: pure JavaScript, no required native dependencies
+- Default engine: `CodecMedia.createDefault()` returns `StubCodecMediaEngine` with `DefaultConversionHub` wired by default
+- Test status in this working tree: `175` tests passing with `npm test`
 
-- `src/` contains the Node.js implementation used by this npm package.
-- `main/java/` refers to the original Java source layout in the upstream CodecMedia project lineage (not part of this npm package repository).
-- npm publishing is intentionally limited to the Node.js package files (`src`, `README.md`, `LICENSE`).
+## What Works Now
 
-## Features (Current / Experimental)
+### Probe
 
-- Media engine facade via `createDefault()`
-- Probing support for:
-  - MP3 (**available for real-file testing**, experimental)
-  - OGG/Vorbis/Opus (**not ready yet**, in progress)
-  - WAV (RIFF/RIFX/RF64, robust chunk scanning) (**available for real-file testing**, experimental)
-  - AIFF/AIF/AIFC (COMM-based parsing) (**not ready yet**, in progress)
-  - M4A (MP4 audio profile) (**not ready yet**, in progress)
-  - FLAC (STREAMINFO parsing) (**not ready yet**, in progress)
-  - PNG (**available for real-file testing**, experimental)
-  - JPEG (**not ready yet**, in progress)
-  - WebP (**not ready yet**, in progress)
-  - BMP (**not ready yet**, in progress)
-  - TIFF (**not ready yet**, in progress)
-  - HEIC/HEIF/AVIF (basic BMFF parsing) (**not ready yet**, in progress)
-  - MOV (QuickTime container parsing) (**not ready yet**, in progress)
-  - MP4 (basic ISO BMFF parsing) (**available for real-file testing**, experimental)
-  - WebM (**available for real-file testing**, experimental)
-- Validation with size limits works; strict parser checks are partial (currently reliable for WebM and WAV, others still evolving)
-- Metadata read/write with sidecar persistence (`.codecmedia.properties`) is available
-- In-Node extraction workflow is available in limited mode (copy/same-format behavior, no real transcoding)
-- Playback API is available for dry-run; desktop-open backend is optional and environment-dependent
-- Conversion hub routing is implemented via `DefaultConversionHub` (same-format copy, `wav <-> pcm` stub, image-to-image via codec registry, unsupported routes throw explicit errors)
+`probe(input)` and `get(input)` return technical media information for these formats:
 
-### Optional External Adapters (Opt-In)
+| Format | Current behavior |
+| --- | --- |
+| MP3 | Frame parser, duration estimate, bitrate mode, sample rate, channels |
+| WAV | RIFF/RIFX/RF64 parser, PCM stream info, duration, bitrate |
+| AIFF/AIF/AIFC | COMM chunk parser, PCM stream info, duration, bitrate |
+| FLAC | STREAMINFO parser, duration, sample rate, channels, bits per sample |
+| PNG | IHDR parser, width, height, bit depth, color type |
+| JPEG/JPG | SOF parser, width, height, bit precision, channel count |
+| WebP | VP8, VP8L, and VP8X dimension parser |
+| BMP | DIB header parser, width, height, bits per pixel |
+| TIFF/TIF | IFD parser for width, height, and first bits-per-sample value |
+| HEIC/HEIF/AVIF | Basic BMFF brand parser plus `ispe` dimensions and `pixi` bit depth when present |
+| MP4/M4A | Basic ISO BMFF parser for duration, video/audio streams, codecs, bitrate hints |
+| MOV | Basic QuickTime/BMFF parsing through the MP4-family parser path |
+| WebM | EBML/WebM parser for video/audio stream information |
 
-- Core default behavior is pure Node.js and does not execute external binaries.
-- You can opt in to external adapters by passing options to `createDefault(options)`.
-- Example opt-in capabilities:
-  - `enableFfprobeEnhancement: true` to enrich MOV/MP4/WebM probe output when `ffprobe` is available.
-  - `imageToImageTranscodeConverter` to inject/override image converter implementation when you need custom behavior.
+Unknown formats still return a probe result based on extension when possible, with `application/octet-stream` and `UNKNOWN` media type as fallback.
 
-## API Behavior Summary
+### Validate
 
-- `get(input)`: alias of `probe(input)` for convenience.
-- `probe(input)`: detects media/container characteristics and returns technical stream info for supported formats.
-- `readMetadata(input)`: returns derived probe metadata plus sidecar entries when present.
-- `writeMetadata(input, metadata)`: validates and writes metadata to a sidecar properties file next to the input.
-- `extractAudio(input, outputDir, options)`: validates audio input and writes extracted output into `outputDir`.
-- `convert(input, output, options)`: performs routed conversion behavior and enforces `overwrite` handling.
-- `play(input, options)`: supports dry-run playback and optional system default app launch.
-- `validate(input, options)`: validates existence, max size, and optional strict parser-level checks.
+`validate(input, options)` checks:
 
-## Notes and Limitations
+- null/missing input
+- regular file existence
+- `maxBytes`
+- strict parser checks when `strict: true` and a parser is registered
 
-- Current probing focuses on **technical media info** (mime/type/streams/basic tags).
-- Probe routing performs a lightweight header-prefix sniff before full decode to reduce unnecessary full-file reads for clearly unsupported/unknown inputs.
-- `readMetadata` uses sidecar metadata persistence; it is **not** a full embedded tag extractor (for example ID3 album art/APIC).
-- Audio-to-audio conversion is not implemented yet for real transcode cases (for example `mp3 -> ogg`).
-- The only temporary audio conversion path is a stub `wav <-> pcm` route and should be treated as non-final behavior.
-- Same-extension conversion is passthrough copy (`reencoded=false`) via `SameFormatCopyConverter`.
-- Image-to-image conversion is routed through `ImageTranscodeConverter`; PNG codec wiring (`png -> png`) is available in experimental mode.
-- Unsupported routes (for example `video -> audio`, `video -> video`, `audio -> image`) intentionally throw explicit `CodecMediaException` messages.
-- Rich MOV/MP4/WebM ffprobe enrichment is disabled by default and must be explicitly enabled.
-- WebM and WAV parsing/probing should be considered experimental while testing is ongoing.
-- For OpenAL workflows that require OGG from MP3 input, use an external transcoder first (for example ffmpeg), then play the produced OGG.
+Strict validation currently performs real parser checks for:
 
-## Requirements
+`mp3`, `wav`, `aif`, `aiff`, `aifc`, `flac`, `png`, `jpg`, `jpeg`, `webp`, `bmp`, `tif`, `tiff`, `heic`, `heif`, `avif`, `mp4`, `m4a`, and `webm`.
 
-- Node.js 18+
-- npm 9+
+Important: `ogg` is still extension/sniff fallback only in the default npm engine, so strict validation for OGG is not Java-equivalent yet.
+
+### Metadata
+
+`readMetadata(input)` returns:
+
+- derived probe fields: `mimeType`, `extension`, `mediaType`
+- embedded metadata currently supported for:
+  - AIFF text chunks: `title`, `artist`, `copyright`, `comment`
+  - FLAC Vorbis comments: `title`, `artist`, `album`, `comment`, `genre`, `date`
+- sidecar metadata from `<input>.codecmedia.properties`
+
+Sidecar keys do not override core probe fields or embedded fields.
+
+`writeMetadata(input, metadata)` currently validates entries and writes sidecar metadata. Unlike `codecmedia-java`, this npm package does not yet write embedded WAV/AIFF/MP3 metadata back into the media file.
+
+### Extract Audio
+
+`extractAudio(input, outputDir, options)` is a limited workflow:
+
+- accepts audio inputs only
+- creates the output directory
+- copies the source audio file to `<basename>_audio.<format>`
+- requires `targetFormat` to match the source format
+- does not transcode
+
+### Convert
+
+`convert(input, output, options)` uses `DefaultConversionHub` by default.
+
+Implemented routes:
+
+- same-extension copy through `SameFormatCopyConverter`
+- `wav <-> pcm` byte-copy stub
+- image-to-image route through `ImageTranscodeConverter`
+- PNG codec registration is available for `png -> png`
+
+Guardrails:
+
+- `ConversionOptions.targetFormat` is required
+- output extension must match `targetFormat`
+- `overwrite: false` blocks overwriting existing files
+
+Unsupported routes throw `CodecMediaException`, including:
+
+- real audio transcode such as `mp3 -> ogg`
+- `video -> audio`
+- `video -> video`
+- `audio -> image`
+- `image -> audio`
+
+### Playback
+
+`play(input, options)` supports:
+
+- `dryRun: true`
+- optional system default app launch when `allowExternalApp: true`
+
+Unlike Java, npm does not provide an internal Java sampled playback backend.
+
+## Known Gaps vs codecmedia-java
+
+- OGG Vorbis/Opus detailed parser is not ported yet.
+- MOV parsing is basic BMFF-style parsing, not a full separate Java `MovParser` port.
+- Embedded metadata writes for WAV, AIFF, and MP3 are not ported; npm writes sidecar metadata instead.
+- MP3 ID3 metadata reading/writing is not Java-equivalent yet.
+- WAV INFO metadata read/write is not Java-equivalent yet.
+- OGG/FLAC comment writing is not implemented.
+- Real transcoding is not implemented without injecting external behavior.
+- Internal playback is not equivalent to Java sampled playback.
+- Optional `enableFfprobeEnhancement` is documented as an option, but the default pure JS path does not require or execute `ffprobe`.
 
 ## Install
 
@@ -107,16 +142,16 @@ npm install codecmedia
 ```js
 import { CodecMedia } from "codecmedia";
 
-const engine = CodecMedia.createDefault({
-  enableFfprobeEnhancement: false,
-});
-
+const engine = CodecMedia.createDefault();
 const input = "./media/sample.mp4";
 
 const probe = engine.probe(input);
 console.log("Probe:", probe);
 
-const validation = engine.validate(input, { strict: true, maxBytes: 500 * 1024 * 1024 });
+const validation = engine.validate(input, {
+  strict: true,
+  maxBytes: 500 * 1024 * 1024,
+});
 console.log("Validation:", validation);
 
 const metadata = engine.readMetadata(input);
@@ -129,38 +164,45 @@ engine.writeMetadata(input, {
   },
 });
 
-const playback = engine.play(input, { dryRun: true, allowExternalApp: false });
+const playback = engine.play(input, {
+  dryRun: true,
+  allowExternalApp: false,
+});
 console.log("Playback:", playback);
 ```
 
-## Build & Test
+## API Summary
+
+- `CodecMedia.createDefault(options?)`: create the default engine.
+- `get(input)`: alias of `probe(input)`.
+- `probe(input)`: inspect technical media/container information.
+- `readMetadata(input)`: read probe-derived fields, limited embedded metadata, and sidecar metadata.
+- `writeMetadata(input, metadata)`: write sidecar metadata.
+- `extractAudio(input, outputDir, options)`: copy same-format audio into an output directory.
+- `convert(input, output, options)`: run limited conversion routing.
+- `play(input, options)`: dry-run playback or optionally open with the system app.
+- `validate(input, options)`: validate existence, size, and registered strict parsers.
+
+## Build And Test
 
 ```bash
 npm test
 ```
 
-<details>
-  <summary><strong>Latest test result (v1.1.5) — npm test</strong></summary>
+Latest local result:
 
 ```text
-PS G:\Projects\Code\Lib\CodecMedia\codecmedia-npm> npm run test
-
 > codecmedia@1.1.5 test
 > node --test ./test/*.test.js
 
-ℹ tests 159
-ℹ suites 48
-ℹ pass 159
-ℹ fail 0
-ℹ cancelled 0
-ℹ skipped 0
-ℹ todo 0
-ℹ duration_ms 1875.1237
+tests 175
+suites 52
+pass 175
+fail 0
+cancelled 0
+skipped 0
+todo 0
 ```
-
-</details>
-
-Conversion pipeline tests are available in `test/convert.test.js` and are included by the default Node test glob.
 
 Run only conversion tests:
 
@@ -174,4 +216,4 @@ This project is licensed under the Apache License 2.0.
 
 ---
 
-*by TamKungZ_*
+by TamKungZ_

@@ -218,6 +218,7 @@ describe("MP3 — probe (all bundled files)", () => {
     assert.equal(r.mimeType,  "audio/mpeg",   "mimeType");
     assert.equal(r.extension, "mp3",          "extension");
     assert.equal(r.mediaType, MediaType.AUDIO, "mediaType");
+    assert.ok(r.streams.length > 0, "MP3 probe should include parsed stream info");
     // If Mp3Codec is registered → full stream data is available
     if (r.streams.length > 0) {
       assert.equal(r.streams[0].codec, "mp3", "codec=mp3");
@@ -234,6 +235,7 @@ describe("MP3 — probe (all bundled files)", () => {
     assert.equal(r.mimeType,  "audio/mpeg");
     assert.equal(r.extension, "mp3");
     assert.equal(r.mediaType, MediaType.AUDIO);
+    assert.ok(r.streams.length > 0, "MP3 probe should include parsed stream info");
     if (r.streams.length > 0) {
       assert.equal(r.streams[0].codec, "mp3");
       assert.ok(r.durationMillis > 0, "durationMillis > 0");

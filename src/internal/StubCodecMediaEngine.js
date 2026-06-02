@@ -24,13 +24,26 @@ import { ValidationOptions }   from "../options/ValidationOptions.js";
 // Video parsers/codecs
 import { WebmParser } from "./video/webm/WebmParser.js";
 import { WebmCodec }  from "./video/webm/WebmCodec.js";
+import { Mp3Parser }  from "./audio/mp3/Mp3Parser.js";
+import { Mp3Codec }   from "./audio/mp3/Mp3Codec.js";
+import { AiffParser } from "./audio/aiff/AiffParser.js";
+import { AiffCodec }  from "./audio/aiff/AiffCodec.js";
+import { FlacParser } from "./audio/flac/FlacParser.js";
+import { FlacCodec }  from "./audio/flac/FlacCodec.js";
+import { Mp4Parser }  from "./video/mp4/Mp4Parser.js";
 import { Mp4Codec }   from "./video/mp4/Mp4Codec.js";
 import { isSupportedMp4MajorBrand } from "./video/mp4/Mp4Brands.js";
 import { WavParser } from "./audio/wav/WavParser.js";
 import { WavCodec } from "./audio/wav/WavCodec.js";
+import { JpegParser } from "./image/jpeg/JpegParser.js";
 import { PngParser } from "./image/png/PngParser.js";
 import { PngCodec } from "./image/png/PngCodec.js";
+import { WebpParser } from "./image/webp/WebpParser.js";
+import { BmpParser } from "./image/bmp/BmpParser.js";
+import { TiffParser } from "./image/tiff/TiffParser.js";
+import { HeifParser } from "./image/heif/HeifParser.js";
 import { registerImageCodec } from "./convert/ImageTranscodeConverter.js";
+import { DefaultConversionHub } from "./convert/DefaultConversionHub.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -54,8 +67,7 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
   constructor(options = {}) {
     super();
     this._options = options;
-    // ConversionHub will be wired when ported; stub for now
-    this._conversionHub = options.conversionHub ?? null;
+    this._conversionHub = options.conversionHub ?? new DefaultConversionHub();
   }
 
   // ── get ────────────────────────────────────────────────────────────────────
@@ -338,7 +350,7 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
     // ── MOV ─────────────────────────────────────────────────────────────────
     if (likelyMov) {
       try {
-        const MovCodec = requireParser("MovCodec");
+        const MovCodec = requireParser("MovCodec") ?? Mp4Codec;
         if (MovCodec) {
           const info = MovCodec.decode(bytes, input);
           const tags = { sizeBytes: String(size) };
@@ -445,6 +457,7 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
       extension: probe.extension,
       mediaType: probe.mediaType,
     };
+    Object.assign(entries, readEmbeddedMetadata(input, normalizeExt(probe.extension)));
 
     const sidecar = sidecarPath(input);
     if (fs.existsSync(sidecar)) {
@@ -554,6 +567,13 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
       throw new CodecMediaException("ConversionOptions.targetFormat is required");
 
     const reqExt         = normalizeExt(effective.targetFormat);
+    const outputExt      = normalizeExt(extractExtension(output));
+    if (outputExt && reqExt !== outputExt) {
+      throw new CodecMediaException(
+        `Output extension must match target format: expected .${reqExt} but got .${outputExt}`
+      );
+    }
+
     const sourceProbe    = this.probe(input);
     const targetMedia    = mediaTypeByExtension(reqExt);
 
@@ -620,6 +640,10 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
    * @returns {import("../model/ValidationResult.js").ValidationResult}
    */
   validate(input, options) {
+    if (input == null) {
+      return ValidationResult({ valid: false, errors: ["Input file is required"] });
+    }
+
     const effective = options ?? ValidationOptions.defaults();
 
     if (!fs.existsSync(input)) {
@@ -673,6 +697,15 @@ function runStrictParser(ext, bytes) {
         WavParser.parse(bytes);
         return null;
       }
+      case "mp3": {
+        Mp3Parser.parse(bytes);
+        return null;
+      }
+      case "mp4":
+      case "m4a": {
+        Mp4Parser.parse(bytes);
+        return null;
+      }
       case "webm": {
         WebmParser.parse(bytes);
         return null;
@@ -720,13 +753,34 @@ function requireParser(key) {
 // Built-in parser/codec registrations (ported modules)
 registerParser("PngParser", PngParser);
 registerParser("PngCodec", PngCodec);
+registerParser("JpegParser", JpegParser);
+registerParser("WebpParser", WebpParser);
+registerParser("BmpParser", BmpParser);
+registerParser("TiffParser", TiffParser);
+registerParser("HeifParser", HeifParser);
+registerParser("AiffParser", AiffParser);
+registerParser("AiffCodec", AiffCodec);
+registerParser("FlacParser", FlacParser);
+registerParser("FlacCodec", FlacCodec);
+registerParser("Mp3Parser", Mp3Parser);
+registerParser("Mp3Codec", Mp3Codec);
+registerParser("Mp4Parser", Mp4Parser);
+registerParser("Mp4Codec", Mp4Codec);
+registerParser("WavParser", WavParser);
+registerParser("WavCodec", WavCodec);
+registerParser("WebmParser", WebmParser);
+registerParser("WebmCodec", WebmCodec);
 registerImageCodec("png", PngCodec);
 
 // ─── Private file helpers ─────────────────────────────────────────────────────
 
 function ensureExists(input) {
+  if (input == null)
+    throw new CodecMediaException("Input file is required");
   if (!fs.existsSync(input))
     throw new CodecMediaException(`File does not exist: ${input}`);
+  if (!fs.statSync(input).isFile())
+    throw new CodecMediaException(`Input must be a regular file: ${input}`);
 }
 
 function extractExtension(filePath) {
@@ -752,6 +806,24 @@ function readProbePrefix(filePath) {
 
 function sidecarPath(filePath) {
   return filePath + ".codecmedia.properties";
+}
+
+function readEmbeddedMetadata(filePath, extension) {
+  try {
+    const bytes = fs.readFileSync(filePath);
+    switch (extension) {
+      case "aif":
+      case "aiff":
+      case "aifc":
+        return AiffParser.readTextMetadata(bytes);
+      case "flac":
+        return FlacParser.readVorbisCommentMetadata(bytes);
+      default:
+        return {};
+    }
+  } catch (e) {
+    throw new CodecMediaException(`Failed to read embedded metadata: ${filePath}`, e);
+  }
 }
 
 function normalizeExt(format) {

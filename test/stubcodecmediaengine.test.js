@@ -13,6 +13,7 @@ import { PlaybackOptions }       from "../src/options/PlaybackOptions.js";
 import { AudioExtractOptions }   from "../src/options/AudioExtractOptions.js";
 import { ConversionOptions }     from "../src/options/ConversionOptions.js";
 import { Metadata }              from "../src/model/Metadata.js";
+import { WebpParser }            from "../src/internal/image/webp/WebpParser.js";
 
 // ─── Test fixture helpers ─────────────────────────────────────────────────────
 
@@ -92,11 +93,127 @@ const WAV_BYTES  = Buffer.concat([Buffer.from([0x52, 0x49, 0x46, 0x46, 0x00, 0x0
 const PNG_BYTES  = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(128)]);
 const JPEG_BYTES = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(128)]);
 
+function u32be(n) {
+  const b = Buffer.alloc(4);
+  b.writeUInt32BE(n >>> 0, 0);
+  return b;
+}
+
+function box(type, payload) {
+  return Buffer.concat([u32be(payload.length + 8), Buffer.from(type, "ascii"), payload]);
+}
+
+function buildMinimalJpeg() {
+  return Buffer.from([
+    0xff, 0xd8,
+    0xff, 0xc0, 0x00, 0x11,
+    0x08, 0x00, 0x06, 0x00, 0x04, 0x03,
+    0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+    0xff, 0xd9,
+  ]);
+}
+
+function buildMinimalBmp() {
+  const b = Buffer.alloc(54);
+  b.write("BM", 0, "ascii");
+  b.writeUInt32LE(54, 2);
+  b.writeUInt32LE(54, 10);
+  b.writeUInt32LE(40, 14);
+  b.writeInt32LE(8, 18);
+  b.writeInt32LE(5, 22);
+  b.writeUInt16LE(1, 26);
+  b.writeUInt16LE(24, 28);
+  return b;
+}
+
+function buildMinimalWebp() {
+  const b = Buffer.alloc(30);
+  b.write("RIFF", 0, "ascii");
+  b.writeUInt32LE(22, 4);
+  b.write("WEBP", 8, "ascii");
+  b.write("VP8X", 12, "ascii");
+  b.writeUInt32LE(10, 16);
+  b[24] = 10 - 1;
+  b[27] = 7 - 1;
+  return b;
+}
+
+function buildMinimalTiff() {
+  const b = Buffer.alloc(50);
+  b.write("II", 0, "ascii");
+  b.writeUInt16LE(42, 2);
+  b.writeUInt32LE(8, 4);
+  b.writeUInt16LE(3, 8);
+  writeTiffEntry(b, 10, 256, 4, 1, 11);
+  writeTiffEntry(b, 22, 257, 4, 1, 13);
+  writeTiffEntry(b, 34, 258, 3, 1, 8);
+  return b;
+}
+
+function writeTiffEntry(b, offset, tag, type, count, value) {
+  b.writeUInt16LE(tag, offset);
+  b.writeUInt16LE(type, offset + 2);
+  b.writeUInt32LE(count, offset + 4);
+  b.writeUInt32LE(value, offset + 8);
+}
+
+function buildMinimalHeic() {
+  const ftyp = box("ftyp", Buffer.concat([Buffer.from("heic", "ascii"), Buffer.alloc(4)]));
+  const ispe = box("ispe", Buffer.concat([Buffer.alloc(4), u32be(12), u32be(9)]));
+  const ipco = box("ipco", ispe);
+  const iprp = box("iprp", ipco);
+  const meta = box("meta", Buffer.concat([Buffer.alloc(4), iprp]));
+  return Buffer.concat([ftyp, meta]);
+}
+
+function buildMinimalAiff({ title = "Aiff Title" } = {}) {
+  const comm = Buffer.alloc(26);
+  comm.write("COMM", 0, "ascii");
+  comm.writeUInt32BE(18, 4);
+  comm.writeUInt16BE(2, 8);
+  comm.writeUInt32BE(44100, 10);
+  comm.writeUInt16BE(16, 14);
+  Buffer.from([0x40, 0x0e, 0xac, 0x44, 0, 0, 0, 0, 0, 0]).copy(comm, 16);
+
+  const titleBytes = Buffer.from(title, "utf8");
+  const nameHeader = Buffer.alloc(8);
+  nameHeader.write("NAME", 0, "ascii");
+  nameHeader.writeUInt32BE(titleBytes.length, 4);
+  const name = Buffer.concat([nameHeader, titleBytes, titleBytes.length % 2 ? Buffer.from([0]) : Buffer.alloc(0)]);
+
+  const payload = Buffer.concat([Buffer.from("AIFF", "ascii"), comm, name]);
+  const form = Buffer.alloc(8);
+  form.write("FORM", 0, "ascii");
+  form.writeUInt32BE(payload.length, 4);
+  return Buffer.concat([form, payload]);
+}
+
+function buildMinimalFlac({ title = "Flac Title" } = {}) {
+  const streamInfo = Buffer.alloc(34);
+  const packed = (BigInt(44100) << 44n) | (1n << 41n) | (15n << 36n) | 44100n;
+  streamInfo.writeBigUInt64BE(packed, 10);
+
+  const streamHeader = Buffer.from([0x00, 0x00, 0x00, 0x22]);
+  const comment = Buffer.from(`TITLE=${title}`, "utf8");
+  const vendor = Buffer.from("codecmedia-test", "utf8");
+  const vorbis = Buffer.alloc(4 + vendor.length + 4 + 4 + comment.length);
+  let pos = 0;
+  vorbis.writeUInt32LE(vendor.length, pos); pos += 4;
+  vendor.copy(vorbis, pos); pos += vendor.length;
+  vorbis.writeUInt32LE(1, pos); pos += 4;
+  vorbis.writeUInt32LE(comment.length, pos); pos += 4;
+  comment.copy(vorbis, pos);
+
+  const commentHeader = Buffer.from([0x84, (vorbis.length >> 16) & 0xff, (vorbis.length >> 8) & 0xff, vorbis.length & 0xff]);
+  return Buffer.concat([Buffer.from("fLaC", "ascii"), streamHeader, streamInfo, commentHeader, vorbis]);
+}
+
 const engine = new StubCodecMediaEngine();
 
 const TEST_DIR = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
 const REAL_WEBM_480 = path.join(TEST_DIR, "file_example_WEBM_480_900KB.webm");
 const REAL_WEBM_640 = path.join(TEST_DIR, "file_example_WEBM_640_1_4MB.webm");
+const REAL_MP4_480 = path.join(TEST_DIR, "file_example_MP4_480_1_5MG.mp4");
 
 // ─── probe ────────────────────────────────────────────────────────────────────
 
@@ -204,6 +321,99 @@ describe("probe — sniff by magic bytes, not only extension", () => {
 
 // ─── validate ─────────────────────────────────────────────────────────────────
 
+describe("probe — Java parity image/container headers", () => {
+  it("populates JPEG dimensions and tags", () => {
+    const f = write("photo.jpg", buildMinimalJpeg());
+    const r = engine.probe(f);
+    assert.equal(r.mimeType, "image/jpeg");
+    assert.equal(r.streams[0].width, 4);
+    assert.equal(r.streams[0].height, 6);
+    assert.equal(r.tags.bitsPerSample, "8");
+    assert.equal(r.tags.channels, "3");
+  });
+
+  it("populates BMP dimensions and bits-per-pixel", () => {
+    const f = write("bitmap.bmp", buildMinimalBmp());
+    const r = engine.probe(f);
+    assert.equal(r.mimeType, "image/bmp");
+    assert.equal(r.streams[0].width, 8);
+    assert.equal(r.streams[0].height, 5);
+    assert.equal(r.tags.bitsPerPixel, "24");
+  });
+
+  it("populates WebP dimensions and assumed bit depth", () => {
+    const f = write("image.webp", buildMinimalWebp());
+    const r = engine.probe(f);
+    assert.equal(r.mimeType, "image/webp");
+    assert.equal(r.streams[0].width, 10);
+    assert.equal(r.streams[0].height, 7);
+    assert.equal(r.tags.bitDepth, "8");
+  });
+
+  it("rejects WebP RIFF sizes larger than the available bytes", () => {
+    const bytes = buildMinimalWebp();
+    bytes.writeUInt32LE(0x80000000, 4);
+    assert.equal(WebpParser.isLikelyWebp(bytes), false);
+  });
+
+  it("populates TIFF dimensions and bit depth", () => {
+    const f = write("scan.tif", buildMinimalTiff());
+    const r = engine.probe(f);
+    assert.equal(r.mimeType, "image/tiff");
+    assert.equal(r.streams[0].width, 11);
+    assert.equal(r.streams[0].height, 13);
+    assert.equal(r.tags.bitDepth, "8");
+  });
+
+  it("populates HEIC brand and dimensions", () => {
+    const f = write("still.heic", buildMinimalHeic());
+    const r = engine.probe(f);
+    assert.equal(r.mimeType, "image/heic");
+    assert.equal(r.extension, "heic");
+    assert.equal(r.streams[0].width, 12);
+    assert.equal(r.streams[0].height, 9);
+    assert.equal(r.tags.majorBrand, "heic");
+  });
+});
+
+describe("probe — Java parity audio headers", () => {
+  it("populates AIFF stream fields", () => {
+    const f = write("sample.aiff", buildMinimalAiff());
+    const r = engine.probe(f);
+    assert.equal(r.mimeType, "audio/aiff");
+    assert.equal(r.mediaType, MediaType.AUDIO);
+    assert.equal(r.durationMillis, 1000);
+    assert.equal(r.streams[0].codec, "pcm");
+    assert.equal(r.streams[0].sampleRate, 44100);
+    assert.equal(r.streams[0].channels, 2);
+    assert.equal(r.tags.bitrateMode, "CBR");
+  });
+
+  it("populates FLAC stream fields", () => {
+    const f = write("sample.flac", buildMinimalFlac());
+    const r = engine.probe(f);
+    assert.equal(r.mimeType, "audio/flac");
+    assert.equal(r.mediaType, MediaType.AUDIO);
+    assert.equal(r.durationMillis, 1000);
+    assert.equal(r.streams[0].codec, "flac");
+    assert.equal(r.streams[0].sampleRate, 44100);
+    assert.equal(r.streams[0].channels, 2);
+    assert.equal(r.tags.bitsPerSample, "16");
+  });
+});
+
+describe("probe — MOV compatibility", () => {
+  it("uses BMFF parsing for .mov files instead of extension-only fallback", () => {
+    assert.equal(fs.existsSync(REAL_MP4_480), true);
+    const f = path.join(TMP, "renamed.mov");
+    fs.copyFileSync(REAL_MP4_480, f);
+    const r = engine.probe(f);
+    assert.equal(r.mimeType, "video/quicktime");
+    assert.equal(r.extension, "mov");
+    assert.ok(r.streams.length > 0);
+  });
+});
+
 describe("validate", () => {
   it("returns valid=true for existing file within size", () => {
     const f = write("v1.webm", WEBM_BYTES);
@@ -216,6 +426,12 @@ describe("validate", () => {
     const r = engine.validate(path.join(TMP, "ghost.mp4"), null);
     assert.equal(r.valid, false);
     assert.ok(r.errors[0].includes("does not exist"));
+  });
+
+  it("returns valid=false for null input like Java", () => {
+    const r = engine.validate(null, null);
+    assert.equal(r.valid, false);
+    assert.equal(r.errors[0], "Input file is required");
   });
 
   it("returns valid=false when file exceeds maxBytes", () => {
@@ -254,6 +470,22 @@ describe("validate", () => {
     const r = engine.validate(REAL_WEBM_480, ValidationOptions({ strict: true, maxBytes: 500 * 1024 * 1024 }));
     assert.equal(r.valid, true);
   });
+
+  it("strict mode — ported image/container parsers pass", () => {
+    for (const [name, bytes] of [
+      ["strict.jpg", buildMinimalJpeg()],
+      ["strict.bmp", buildMinimalBmp()],
+      ["strict.webp", buildMinimalWebp()],
+      ["strict.tif", buildMinimalTiff()],
+      ["strict.heic", buildMinimalHeic()],
+      ["strict.aiff", buildMinimalAiff()],
+      ["strict.flac", buildMinimalFlac()],
+    ]) {
+      const f = write(name, bytes);
+      const r = engine.validate(f, ValidationOptions({ strict: true, maxBytes: 500 * 1024 * 1024 }));
+      assert.equal(r.valid, true, name);
+    }
+  });
 });
 
 // ─── readMetadata / writeMetadata ─────────────────────────────────────────────
@@ -269,6 +501,18 @@ describe("readMetadata", () => {
 
   it("throws for missing file", () => {
     assert.throws(() => engine.readMetadata(path.join(TMP, "nope.webm")), CodecMediaException);
+  });
+
+  it("includes embedded AIFF text metadata", () => {
+    const f = write("embedded.aiff", buildMinimalAiff({ title: "Embedded AIFF" }));
+    const m = engine.readMetadata(f);
+    assert.equal(m.entries.title, "Embedded AIFF");
+  });
+
+  it("includes embedded FLAC Vorbis comments", () => {
+    const f = write("embedded.flac", buildMinimalFlac({ title: "Embedded FLAC" }));
+    const m = engine.readMetadata(f);
+    assert.equal(m.entries.title, "Embedded FLAC");
   });
 });
 
@@ -393,12 +637,30 @@ describe("play — dryRun", () => {
 
 // ─── convert ──────────────────────────────────────────────────────────────────
 
-describe("convert — no hub", () => {
-  it("throws CodecMediaException when conversionHub not available", () => {
+describe("convert — default hub", () => {
+  it("uses the default hub for same-format copy", () => {
+    const f = write("conv-copy.webm", WEBM_BYTES);
+    const output = path.join(TMP, "conv-copy-out.webm");
+    const r = engine.convert(f, output, ConversionOptions.defaults("webm"));
+    assert.equal(r.outputFile, output);
+    assert.equal(r.format, "webm");
+    assert.equal(r.reencoded, false);
+    assert.deepEqual(fs.readFileSync(output), WEBM_BYTES);
+  });
+
+  it("throws for unsupported default hub routes", () => {
     const f = write("conv.webm", WEBM_BYTES);
     assert.throws(
       () => engine.convert(f, path.join(TMP, "out.mp4"), ConversionOptions.defaults("mp4")),
       CodecMediaException
+    );
+  });
+
+  it("throws when output extension does not match target format", () => {
+    const f = write("conv-mismatch.webm", WEBM_BYTES);
+    assert.throws(
+      () => engine.convert(f, path.join(TMP, "out.mp4"), ConversionOptions.defaults("webm")),
+      /Output extension must match target format/
     );
   });
 
