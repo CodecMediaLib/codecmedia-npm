@@ -188,6 +188,25 @@ function buildMinimalAiff({ title = "Aiff Title" } = {}) {
   return Buffer.concat([form, payload]);
 }
 
+function buildMinimalWav(pcm = Buffer.from([1, 2, 3, 4])) {
+  const b = Buffer.alloc(44 + pcm.length);
+  b.write("RIFF", 0, "ascii");
+  b.writeUInt32LE(36 + pcm.length, 4);
+  b.write("WAVE", 8, "ascii");
+  b.write("fmt ", 12, "ascii");
+  b.writeUInt32LE(16, 16);
+  b.writeUInt16LE(1, 20);
+  b.writeUInt16LE(1, 22);
+  b.writeUInt32LE(8000, 24);
+  b.writeUInt32LE(16000, 28);
+  b.writeUInt16LE(2, 32);
+  b.writeUInt16LE(16, 34);
+  b.write("data", 36, "ascii");
+  b.writeUInt32LE(pcm.length, 40);
+  pcm.copy(b, 44);
+  return b;
+}
+
 function buildMinimalFlac({ title = "Flac Title" } = {}) {
   const streamInfo = Buffer.alloc(34);
   const packed = (BigInt(44100) << 44n) | (1n << 41n) | (15n << 36n) | 44100n;
@@ -206,6 +225,29 @@ function buildMinimalFlac({ title = "Flac Title" } = {}) {
 
   const commentHeader = Buffer.from([0x84, (vorbis.length >> 16) & 0xff, (vorbis.length >> 8) & 0xff, vorbis.length & 0xff]);
   return Buffer.concat([Buffer.from("fLaC", "ascii"), streamHeader, streamInfo, commentHeader, vorbis]);
+}
+
+function buildIsoBmffAudioTrack({ majorBrand = "isom", audioSampleEntryFourCc = "mp4a" } = {}) {
+  const hdlrPayload = Buffer.concat([
+    Buffer.alloc(4),
+    Buffer.alloc(4),
+    Buffer.from("soun", "ascii"),
+    Buffer.alloc(4),
+  ]);
+  const hdlr = box("hdlr", hdlrPayload);
+  const sampleEntry = box(audioSampleEntryFourCc, Buffer.alloc(16));
+  const stsd = box("stsd", Buffer.concat([Buffer.alloc(4), u32be(1), sampleEntry]));
+  const stbl = box("stbl", stsd);
+  const minf = box("minf", stbl);
+  const mdia = box("mdia", Buffer.concat([hdlr, minf]));
+  const trak = box("trak", mdia);
+  const moov = box("moov", trak);
+  const ftyp = box("ftyp", Buffer.concat([
+    Buffer.from(majorBrand, "ascii"),
+    Buffer.alloc(4),
+    Buffer.from("isom", "ascii"),
+  ]));
+  return Buffer.concat([ftyp, moov]);
 }
 
 const engine = new StubCodecMediaEngine();
@@ -514,6 +556,13 @@ describe("readMetadata", () => {
     const m = engine.readMetadata(f);
     assert.equal(m.entries.title, "Embedded FLAC");
   });
+
+  it("includes embedded WAV INFO metadata", () => {
+    const f = write("embedded.wav", buildMinimalWav());
+    engine.writeMetadata(f, Metadata({ entries: { title: "Embedded WAV" } }));
+    const m = engine.readMetadata(f);
+    assert.equal(m.entries.title, "Embedded WAV");
+  });
 });
 
 describe("writeMetadata / readMetadata round-trip", () => {
@@ -533,6 +582,65 @@ describe("writeMetadata / readMetadata round-trip", () => {
     const m = engine.readMetadata(f);
     // readMetadata uses putIfAbsent — probe keys win
     assert.equal(m.entries.mimeType, "video/webm");
+  });
+
+  it("persists supported WAV metadata in embedded INFO chunks", () => {
+    const f = write("rw-wav.wav", buildMinimalWav());
+    engine.writeMetadata(f, Metadata({ entries: {
+      title: "Embedded WAV Title",
+      artist: "Embedded WAV Artist",
+      album: "Embedded WAV Album",
+      comment: "Embedded WAV Comment",
+      date: "2026-03-16",
+      genre: "Test Genre",
+    } }));
+
+    const m = engine.readMetadata(f);
+    assert.equal(m.entries.title, "Embedded WAV Title");
+    assert.equal(m.entries.artist, "Embedded WAV Artist");
+    assert.equal(m.entries.album, "Embedded WAV Album");
+    assert.equal(m.entries.comment, "Embedded WAV Comment");
+    assert.equal(m.entries.date, "2026-03-16");
+    assert.equal(m.entries.genre, "Test Genre");
+    assert.equal(fs.existsSync(f + ".codecmedia.properties"), false);
+  });
+
+  it("persists supported AIFF metadata in embedded text chunks", () => {
+    const f = write("rw-aiff.aiff", buildMinimalAiff());
+    engine.writeMetadata(f, Metadata({ entries: {
+      title: "Embedded AIFF Title",
+      artist: "Embedded AIFF Artist",
+      copyright: "(c) CodecMedia",
+      comment: "Embedded AIFF Comment",
+    } }));
+
+    const m = engine.readMetadata(f);
+    assert.equal(m.entries.title, "Embedded AIFF Title");
+    assert.equal(m.entries.artist, "Embedded AIFF Artist");
+    assert.equal(m.entries.copyright, "(c) CodecMedia");
+    assert.equal(m.entries.comment, "Embedded AIFF Comment");
+    assert.equal(fs.existsSync(f + ".codecmedia.properties"), false);
+  });
+
+  it("persists supported MP3 metadata in embedded ID3v1 tags", () => {
+    const f = write("rw-mp3.mp3", MP3_BYTES);
+    engine.writeMetadata(f, Metadata({ entries: {
+      title: "ID3v1 Title",
+      artist: "ID3v1 Artist",
+      album: "ID3v1 Album",
+      date: "2026-03-16",
+      comment: "ID3v1 Comment",
+      genre: "13",
+    } }));
+
+    const m = engine.readMetadata(f);
+    assert.equal(m.entries.title, "ID3v1 Title");
+    assert.equal(m.entries.artist, "ID3v1 Artist");
+    assert.equal(m.entries.album, "ID3v1 Album");
+    assert.equal(m.entries.date, "2026");
+    assert.equal(m.entries.comment, "ID3v1 Comment");
+    assert.equal(m.entries.genre, "13");
+    assert.equal(fs.existsSync(f + ".codecmedia.properties"), false);
   });
 
   it("throws on null metadata", () => {
@@ -653,6 +761,26 @@ describe("convert — default hub", () => {
     assert.throws(
       () => engine.convert(f, path.join(TMP, "out.mp4"), ConversionOptions.defaults("mp4")),
       CodecMediaException
+    );
+  });
+
+  it("remuxes mp4 audio tracks to m4a without re-encoding", () => {
+    const f = write("audio-track.mp4", buildIsoBmffAudioTrack({ majorBrand: "isom", audioSampleEntryFourCc: "mp4a" }));
+    const output = path.join(TMP, "audio-track.m4a");
+    const r = engine.convert(f, output, ConversionOptions({ targetFormat: "m4a", preset: "balanced", overwrite: true }));
+    assert.equal(r.format, "m4a");
+    assert.equal(r.reencoded, false);
+    assert.ok(fs.existsSync(output));
+    const probed = engine.probe(output);
+    assert.equal(probed.mimeType, "audio/mp4");
+    assert.equal(probed.extension, "m4a");
+  });
+
+  it("rejects m4a remux when the audio codec is not compatible", () => {
+    const f = write("audio-track-bad.mp4", buildIsoBmffAudioTrack({ majorBrand: "isom", audioSampleEntryFourCc: "lpcm" }));
+    assert.throws(
+      () => engine.convert(f, path.join(TMP, "audio-track-bad.m4a"), ConversionOptions({ targetFormat: "m4a", preset: "balanced", overwrite: true })),
+      /not m4a-compatible/
     );
   });
 

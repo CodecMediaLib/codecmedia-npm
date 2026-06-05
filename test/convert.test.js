@@ -3,7 +3,7 @@
  *
  * Unit tests for the conversion pipeline:
  *   ConversionRouteResolver, DefaultConversionHub,
- *   SameFormatCopyConverter, WavPcmStubConverter,
+ *   SameFormatCopyConverter, WavPcmConverter,
  *   UnsupportedRouteConverter, ImageTranscodeConverter
  *
  * Run: node --test ./test/convert.test.js
@@ -22,7 +22,7 @@ import os   from "node:os";
 import { ConversionRoute }          from "../src/internal/convert/ConversionRoute.js";
 import { ConversionRouteResolver }  from "../src/internal/convert/ConversionRouteResolver.js";
 import { SameFormatCopyConverter }  from "../src/internal/convert/SameFormatCopyConverter.js";
-import { WavPcmStubConverter }      from "../src/internal/convert/WavPcmStubConverter.js";
+import { WavPcmConverter }          from "../src/internal/convert/WavPcmConverter.js";
 import { UnsupportedRouteConverter } from "../src/internal/convert/UnsupportedRouteConverter.js";
 import { DefaultConversionHub }     from "../src/internal/convert/DefaultConversionHub.js";
 import { ImageTranscodeConverter, registerImageCodec } from "../src/internal/convert/ImageTranscodeConverter.js";
@@ -50,6 +50,25 @@ function makeRequest(overrides = {}) {
 function writeDummy(filePath, content = "DUMMY") {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content);
+}
+
+function buildMinimalWav(pcm = Buffer.from([1, 2, 3, 4])) {
+  const b = Buffer.alloc(44 + pcm.length);
+  b.write("RIFF", 0, "ascii");
+  b.writeUInt32LE(36 + pcm.length, 4);
+  b.write("WAVE", 8, "ascii");
+  b.write("fmt ", 12, "ascii");
+  b.writeUInt32LE(16, 16);
+  b.writeUInt16LE(1, 20);
+  b.writeUInt16LE(1, 22);
+  b.writeUInt32LE(8000, 24);
+  b.writeUInt32LE(16000, 28);
+  b.writeUInt16LE(2, 32);
+  b.writeUInt16LE(16, 34);
+  b.write("data", 36, "ascii");
+  b.writeUInt32LE(pcm.length, 40);
+  pcm.copy(b, 44);
+  return b;
 }
 
 const FIXTURE_PNG_500KB = path.join(process.cwd(), "test", "file_example_PNG_500kB.png");
@@ -186,36 +205,61 @@ describe("SameFormatCopyConverter", () => {
   });
 });
 
-// ─── WavPcmStubConverter ──────────────────────────────────────────────────────
+// ─── WavPcmConverter ──────────────────────────────────────────────────────────
 
-describe("WavPcmStubConverter", () => {
-  const converter = new WavPcmStubConverter();
+describe("WavPcmConverter", () => {
+  const converter = new WavPcmConverter();
 
-  it("converts wav → pcm (byte copy)", () => {
+  it("converts wav → pcm by extracting the data chunk", () => {
     const dir    = tmpDir();
     const input  = path.join(dir, "in.wav");
     const output = path.join(dir, "out.pcm");
-    writeDummy(input, "PCM_STUB");
+    const pcm = Buffer.from([9, 8, 7, 6]);
+    fs.writeFileSync(input, buildMinimalWav(pcm));
 
     const result = converter.convert(makeRequest({ input, output,
       sourceExtension: "wav", targetExtension: "pcm" }));
 
     assert.equal(result.format,    "pcm");
-    assert.equal(result.reencoded, false);
-    assert.equal(fs.readFileSync(output, "utf8"), "PCM_STUB");
+    assert.equal(result.reencoded, true);
+    assert.deepEqual(fs.readFileSync(output), pcm);
   });
 
-  it("converts pcm → wav (byte copy)", () => {
+  it("converts pcm → wav by wrapping raw PCM in a WAV container", () => {
     const dir    = tmpDir();
     const input  = path.join(dir, "in.pcm");
     const output = path.join(dir, "out.wav");
-    writeDummy(input, "WAV_STUB");
+    const pcm = Buffer.from([1, 2, 3, 4, 5, 6]);
+    fs.writeFileSync(input, pcm);
 
     const result = converter.convert(makeRequest({ input, output,
       sourceExtension: "pcm", targetExtension: "wav" }));
 
     assert.equal(result.format, "wav");
-    assert.equal(fs.readFileSync(output, "utf8"), "WAV_STUB");
+    const wav = fs.readFileSync(output);
+    assert.equal(wav.subarray(0, 4).toString("ascii"), "RIFF");
+    assert.equal(wav.subarray(8, 12).toString("ascii"), "WAVE");
+    assert.deepEqual(wav.subarray(44), pcm);
+  });
+
+  it("honors pcm → wav preset parameters", () => {
+    const dir    = tmpDir();
+    const input  = path.join(dir, "in.pcm");
+    const output = path.join(dir, "out.wav");
+    fs.writeFileSync(input, Buffer.from([1, 2, 3, 4]));
+
+    converter.convert(makeRequest({
+      input,
+      output,
+      sourceExtension: "pcm",
+      targetExtension: "wav",
+      options: ConversionOptions({ targetFormat: "wav", preset: "sr=16000,ch=1,bits=8", overwrite: false }),
+    }));
+
+    const wav = fs.readFileSync(output);
+    assert.equal(wav.readUInt16LE(22), 1);
+    assert.equal(wav.readUInt32LE(24), 16000);
+    assert.equal(wav.readUInt16LE(34), 8);
   });
 
   it("throws for unsupported pair (e.g. wav → mp3)", () => {
@@ -235,7 +279,7 @@ describe("WavPcmStubConverter", () => {
     const dir    = tmpDir();
     const input  = path.join(dir, "in.wav");
     const output = path.join(dir, "out.pcm");
-    writeDummy(input);
+    fs.writeFileSync(input, buildMinimalWav());
     writeDummy(output);
 
     const opts = ConversionOptions({ targetFormat: "pcm", preset: "balanced", overwrite: false });
@@ -296,21 +340,21 @@ describe("DefaultConversionHub", () => {
     assert.equal(fs.readFileSync(output, "utf8"), "WAVE");
   });
 
-  it("wav → pcm routes to WavPcmStubConverter", () => {
+  it("wav → pcm routes to WavPcmConverter", () => {
     const dir    = tmpDir();
     const input  = path.join(dir, "in.wav");
     const output = path.join(dir, "out.pcm");
-    writeDummy(input, "DATA");
+    fs.writeFileSync(input, buildMinimalWav(Buffer.from([4, 3, 2, 1])));
 
     const result = hub.convert(makeRequest({ input, output,
       sourceExtension: "wav", targetExtension: "pcm",
       sourceMediaType: MediaType.AUDIO, targetMediaType: MediaType.AUDIO }));
 
     assert.equal(result.format,    "pcm");
-    assert.equal(result.reencoded, false);
+    assert.equal(result.reencoded, true);
   });
 
-  it("pcm → wav routes to WavPcmStubConverter", () => {
+  it("pcm → wav routes to WavPcmConverter", () => {
     const dir    = tmpDir();
     const input  = path.join(dir, "in.pcm");
     const output = path.join(dir, "out.wav");

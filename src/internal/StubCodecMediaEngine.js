@@ -26,6 +26,7 @@ import { WebmParser } from "./video/webm/WebmParser.js";
 import { WebmCodec }  from "./video/webm/WebmCodec.js";
 import { Mp3Parser }  from "./audio/mp3/Mp3Parser.js";
 import { Mp3Codec }   from "./audio/mp3/Mp3Codec.js";
+import { Mp3Id3v1Tag } from "./audio/mp3/Mp3Id3v1Tag.js";
 import { AiffParser } from "./audio/aiff/AiffParser.js";
 import { AiffCodec }  from "./audio/aiff/AiffCodec.js";
 import { FlacParser } from "./audio/flac/FlacParser.js";
@@ -491,6 +492,43 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
       if (v == null)  throw new CodecMediaException(`Metadata value must not be null for key: ${k}`);
     }
 
+    const extension = normalizeExt(extractExtension(input));
+    if (extension === "wav") {
+      try {
+        const withMetadata = WavParser.writeInfoMetadata(fs.readFileSync(input), metadata.entries);
+        writeFileAtomically(input, withMetadata);
+        deleteSidecarIfExists(input);
+        return;
+      } catch (e) {
+        if (e instanceof CodecMediaException) throw e;
+        throw new CodecMediaException(`Failed to write WAV metadata: ${input}`, e);
+      }
+    }
+
+    if (["aif", "aiff", "aifc"].includes(extension)) {
+      try {
+        const withMetadata = AiffParser.writeTextMetadata(fs.readFileSync(input), metadata.entries);
+        writeFileAtomically(input, withMetadata);
+        deleteSidecarIfExists(input);
+        return;
+      } catch (e) {
+        if (e instanceof CodecMediaException) throw e;
+        throw new CodecMediaException(`Failed to write AIFF metadata: ${input}`, e);
+      }
+    }
+
+    if (extension === "mp3") {
+      try {
+        const withTag = Mp3Id3v1Tag.write(fs.readFileSync(input), metadata.entries);
+        writeFileAtomically(input, withTag);
+        deleteSidecarIfExists(input);
+        return;
+      } catch (e) {
+        if (e instanceof CodecMediaException) throw e;
+        throw new CodecMediaException(`Failed to write MP3 metadata: ${input}`, e);
+      }
+    }
+
     const sorted  = Object.keys(metadata.entries).sort();
     const lines   = ["# CodecMedia metadata sidecar", `# ${new Date().toISOString()}`];
     for (const k of sorted) {
@@ -521,17 +559,14 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
     const probe     = this.probe(input);
     const effective = options ?? AudioExtractOptions.defaults(normalizeExt(probe.extension));
 
-    if (!effective.targetFormat?.trim())
-      throw new CodecMediaException("AudioExtractOptions.targetFormat is required");
-
     if (probe.mediaType !== MediaType.AUDIO)
       throw new CodecMediaException(`Input is not an audio file: ${input}`);
 
     const srcExt = normalizeExt(probe.extension);
-    const reqExt = normalizeExt(effective.targetFormat);
+    const reqExt = normalizeExt(effective.targetFormat) || srcExt;
     if (reqExt !== srcExt) {
       throw new CodecMediaException(
-        `Stub extractAudio does not transcode. Requested format '${reqExt}' must match source format '${srcExt}'`
+        `Audio extraction does not support format conversion yet. Requested format '${reqExt}' must match source format '${srcExt}'`
       );
     }
 
@@ -812,10 +847,14 @@ function readEmbeddedMetadata(filePath, extension) {
   try {
     const bytes = fs.readFileSync(filePath);
     switch (extension) {
+      case "wav":
+        return WavParser.readInfoMetadata(bytes);
       case "aif":
       case "aiff":
       case "aifc":
         return AiffParser.readTextMetadata(bytes);
+      case "mp3":
+        return Mp3Id3v1Tag.read(bytes);
       case "flac":
         return FlacParser.readVorbisCommentMetadata(bytes);
       default:
@@ -823,6 +862,26 @@ function readEmbeddedMetadata(filePath, extension) {
     }
   } catch (e) {
     throw new CodecMediaException(`Failed to read embedded metadata: ${filePath}`, e);
+  }
+}
+
+function deleteSidecarIfExists(filePath) {
+  fs.rmSync(sidecarPath(filePath), { force: true });
+}
+
+function writeFileAtomically(target, bytes) {
+  const parent = path.dirname(target) || ".";
+  fs.mkdirSync(parent, { recursive: true });
+  const temp = path.join(parent, `${path.basename(target)}.${process.pid}.${Date.now()}.tmp`);
+  let moved = false;
+  try {
+    fs.writeFileSync(temp, bytes);
+    fs.renameSync(temp, target);
+    moved = true;
+  } finally {
+    if (!moved) {
+      fs.rmSync(temp, { force: true });
+    }
   }
 }
 

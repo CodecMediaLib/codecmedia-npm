@@ -270,14 +270,14 @@ describe("MP3 — readMetadata()", () => {
 });
 
 describe("MP3 — writeMetadata() + readMetadata() round-trip", () => {
-  it("persists custom tags to sidecar", (t) => {
+  it("persists supported custom tags to embedded ID3v1", (t) => {
     skipIfMissing(t, "mp3_700kb");
     const copy = path.join(TMP, "mp3_700kb_copy.mp3");
     fs.copyFileSync(PRESENT.mp3_700kb, copy);
-    engine.writeMetadata(copy, Metadata({ entries: { title: "Test Track", year: "2025" } }));
+    engine.writeMetadata(copy, Metadata({ entries: { title: "Test Track", date: "2025" } }));
     const m = engine.readMetadata(copy);
     assert.equal(m.entries.title, "Test Track");
-    assert.equal(m.entries.year,  "2025");
+    assert.equal(m.entries.date,  "2025");
     assert.equal(m.entries.mimeType, "audio/mpeg"); // probe wins
   });
 });
