@@ -11,7 +11,7 @@ CodecMedia is a pure Node.js port of the CodecMedia Java engine. It provides syn
 The package is still a work in progress. It aims to mirror `codecmedia-java` where Java behavior can be reasonably implemented in npm without native dependencies or external binaries.
 
 <p align="center">
-  <img src="https://codecmedia.tamkungz.me/CodecMedia_Full_Logo.png" width="70%" alt="CodecMedia Logo">
+  <img src="https://pub-df28fb9f69aa4326a1c6e10fb1f2abdc.r2.dev/assets-image/codecmedia/CodecMedia_Full_Logo.png" width="70%" alt="CodecMedia Logo">
 </p>
 
 ## Status
