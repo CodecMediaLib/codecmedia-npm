@@ -1,4 +1,7 @@
 /main/
+.backup/
+.backup/**
+/.backup/
 /.tmp-smoke/
 /.tmp-smoke2/
 /node_modules/
