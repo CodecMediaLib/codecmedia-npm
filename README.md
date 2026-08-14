@@ -8,7 +8,7 @@
 CodecMedia is the Node.js implementation of the CodecMedia media engine. It keeps the default runtime synchronous and dependency-free while providing real probing, validation, metadata handling, lightweight container operations, and optional FFmpeg/ffprobe integration for jobs that cannot be implemented reasonably with a small pure-JavaScript core.
 
 <p align="center">
-  <img src="https://codecmedia.tamkungz.me/CodecMedia_Full_Logo.png" width="70%" alt="CodecMedia Logo">
+  <img src="https://pub-df28fb9f69aa4326a1c6e10fb1f2abdc.r2.dev/assets-image/codecmedia/CodecMedia_Full_Logo.png" width="70%" alt="CodecMedia Logo">
 </p>
 
 ## Status
