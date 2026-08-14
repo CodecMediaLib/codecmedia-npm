@@ -201,9 +201,14 @@ npm test
 Current source-tree result:
 
 ```text
-tests 11
-pass 11
-fail 0
+ℹ tests 193
+ℹ suites 52
+ℹ pass 193
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1123.035647
 ```
 
 The optional FFmpeg/ffprobe tests automatically skip on systems where those executables are unavailable.
