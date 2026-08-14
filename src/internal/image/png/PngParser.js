@@ -14,7 +14,7 @@ export class PngParser {
    * @returns {boolean}
    */
   static isLikelyPng(bytes) {
-    if (bytes.length < PNG_SIGNATURE.length) return false;
+    if (bytes == null || bytes.length < PNG_SIGNATURE.length) return false;
     for (let i = 0; i < PNG_SIGNATURE.length; i++) {
       if (bytes[i] !== PNG_SIGNATURE[i]) return false;
     }
@@ -53,6 +53,18 @@ export class PngParser {
 
     if (width <= 0 || height <= 0) {
       throw new CodecMediaException("PNG has invalid dimensions");
+    }
+    if (![1, 2, 4, 8, 16].includes(bitDepth)) {
+      throw new CodecMediaException(`PNG has invalid bit depth: ${bitDepth}`);
+    }
+    const validCombination =
+      (colorType === 0 && [1, 2, 4, 8, 16].includes(bitDepth)) ||
+      (colorType === 2 && [8, 16].includes(bitDepth)) ||
+      (colorType === 3 && [1, 2, 4, 8].includes(bitDepth)) ||
+      (colorType === 4 && [8, 16].includes(bitDepth)) ||
+      (colorType === 6 && [8, 16].includes(bitDepth));
+    if (!validCombination) {
+      throw new CodecMediaException(`PNG has invalid bit depth/color type combination: bitDepth=${bitDepth}, colorType=${colorType}`);
     }
 
     return PngProbeInfo({ width, height, bitDepth, colorType });
