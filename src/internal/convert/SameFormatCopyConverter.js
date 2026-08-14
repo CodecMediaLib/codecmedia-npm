@@ -19,6 +19,10 @@ export class SameFormatCopyConverter {
       const parent = path.dirname(output);
       if (parent) fs.mkdirSync(parent, { recursive: true });
 
+      const samePath = path.resolve(input) === path.resolve(output);
+      if (samePath) {
+        return ConversionResult({ outputFile: output, format: targetExtension, reencoded: false });
+      }
       if (fs.existsSync(output) && !options.overwrite) {
         throw new CodecMediaException(`Output already exists and overwrite is disabled: ${output}`);
       }
