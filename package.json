@@ -1,8 +1,8 @@
 {
   "name": "codecmedia",
-  "version": "1.1.7",
+  "version": "1.2.0",
   "type": "module",
-  "description": "Node.js port of CodecMedia for media probing, validation, metadata sidecar persistence, audio extraction, playback workflow simulation, and conversion routing (Image/Video/Audio).",
+  "description": "Synchronous Node.js media probing, validation, metadata, extraction and conversion with a zero-dependency core and optional FFmpeg/ffprobe integration.",
   "license": "Apache-2.0",
   "author": {
     "name": "TamKungZ_",
@@ -19,37 +19,30 @@
   "keywords": [
     "media",
     "codec",
-    "java-port",
     "probe",
     "metadata",
     "audio",
     "video",
     "image",
     "validation",
-    "conversion"
+    "conversion",
+    "ffmpeg"
   ],
   "engines": {
     "node": ">=18"
   },
   "main": "src/index.js",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "node --test ./test/*.test.js",
-    "test:webm:real": "node --test ./test/webm.integration.test.js",
-    "test:mp3:real": "node --test ./test/mp3.integration.test.js",
-    "test:convert": "node --test ./test/convert.test.js",
-    "test:engine:real": "node --test ./test/engine.integration.test.js"
-  },
-  "dependencies": {
-    "fp-ts": "^2.16.11",
-    "io-ts": "^2.2.22"
+    "test": "node --test"
   },
   "files": [
     "src",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md"
+    "CHANGE.md"
   ]
 }
