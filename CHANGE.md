@@ -30,7 +30,7 @@ This release turns the npm port from a mostly Java-shaped compatibility layer in
 
 ### Fixed
 
-- Fixed QuickTime/MOV probing so `ftyp` files with the `qt  ` major brand are classified as `video/quicktime` before the broader MP4-family path. Legacy QuickTime atoms remain supported without treating every `ftyp` file as MOV.
+- Fixed QuickTime/MOV probing so BMFF-signed `.mov` files are parsed through the BMFF parser but retain `video/quicktime` / `mov` identity even when their major brand is a generic MP4-family brand such as `isom` or `mp42`. `qt  ` and legacy QuickTime atoms remain supported.
 - Fixed strict `.webm` validation falling through as valid when a corrupt file no longer had a recognizable WebM signature; extension dispatch now invokes `WebmParser` and fails malformed input.
 - Restored `extractAudio()` compatibility with the Java-facing contract: non-audio inputs are rejected. Video-to-audio extraction/transcoding remains available through `convert()` when an appropriate route is enabled.
 - Fixed `validate()` incorrectly accepting directories in non-strict mode.

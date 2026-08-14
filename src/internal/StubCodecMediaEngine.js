@@ -132,8 +132,13 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
     // Classify it first by QuickTime-specific brand/legacy box signatures so
     // .mov content does not get collapsed to video/mp4 merely because it has
     // an ftyp box.
-    const sniffMov  = !sniffHeif && isLikelyMov(prefix);
-    const sniffMp4  = !sniffHeif && !sniffMov && Mp4Parser.isLikelyMp4(prefix);
+    const sniffBmffMp4 = !sniffHeif && Mp4Parser.isLikelyMp4(prefix);
+    // Within the ISO-BMFF family, a .mov filename is a useful container hint:
+    // many valid MOV files use generic brands such as `isom`/`mp42` rather than
+    // the QuickTime-only `qt  ` brand. Keep byte validation/parsing authoritative
+    // (the file still has to be BMFF), but preserve the MOV MIME/container identity.
+    const sniffMov  = !sniffHeif && (isLikelyMov(prefix) || (ext === "mov" && sniffBmffMp4));
+    const sniffMp4  = sniffBmffMp4 && !sniffMov;
     const sniffWebm = WebmParser.isLikelyWebm(prefix);
     const hasSignature = sniffMp3 || sniffOgg || sniffWav || sniffAiff || sniffFlac ||
       sniffPng || sniffJpeg || sniffWebp || sniffBmp || sniffTiff || sniffHeif ||
