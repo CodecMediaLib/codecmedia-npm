@@ -128,8 +128,12 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
     const sniffBmp  = BmpParser.isLikelyBmp(prefix);
     const sniffTiff = TiffParser.isLikelyTiff(prefix);
     const sniffHeif = HeifParser.isLikelyHeif(prefix);
-    const sniffMp4  = !sniffHeif && Mp4Parser.isLikelyMp4(prefix);
-    const sniffMov  = !sniffHeif && !sniffMp4 && isLikelyMov(prefix);
+    // QuickTime is also ISO BMFF and therefore passes the MP4 family parser.
+    // Classify it first by QuickTime-specific brand/legacy box signatures so
+    // .mov content does not get collapsed to video/mp4 merely because it has
+    // an ftyp box.
+    const sniffMov  = !sniffHeif && isLikelyMov(prefix);
+    const sniffMp4  = !sniffHeif && !sniffMov && Mp4Parser.isLikelyMp4(prefix);
     const sniffWebm = WebmParser.isLikelyWebm(prefix);
     const hasSignature = sniffMp3 || sniffOgg || sniffWav || sniffAiff || sniffFlac ||
       sniffPng || sniffJpeg || sniffWebp || sniffBmp || sniffTiff || sniffHeif ||
@@ -622,16 +626,16 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
     if (!outputDir) throw new CodecMediaException("Output directory is required");
 
     const probe = this.probe(input);
-    if (probe.mediaType !== MediaType.AUDIO && probe.mediaType !== MediaType.VIDEO) {
-      throw new CodecMediaException(`Input has no extractable audio media type: ${input}`);
+    // Keep extractAudio() compatible with the Java-facing contract: it is an
+    // audio-file extraction/copy/transcode helper, not a generic video demuxer.
+    // Video -> audio remains available through convert() when a route exists.
+    if (probe.mediaType !== MediaType.AUDIO) {
+      throw new CodecMediaException(`Input is not an audio file: ${input}`);
     }
 
     const srcExt = normalizeExt(probe.extension) || normalizeExt(extractExtension(input));
-    const effective = options ?? AudioExtractOptions.defaults(
-      probe.mediaType === MediaType.VIDEO ? "m4a" : srcExt
-    );
-    const reqExt = normalizeExt(effective.targetFormat) ||
-      (probe.mediaType === MediaType.VIDEO ? "m4a" : srcExt);
+    const effective = options ?? AudioExtractOptions.defaults(srcExt);
+    const reqExt = normalizeExt(effective.targetFormat) || srcExt;
 
     try {
       fs.mkdirSync(outputDir, { recursive: true });
@@ -851,6 +855,7 @@ function parserKeyForExt(ext) {
     webp: "WebpParser", bmp: "BmpParser",
     tif: "TiffParser", tiff: "TiffParser",
     heic: "HeifParser", heif: "HeifParser", avif: "HeifParser",
+    webm: "WebmParser",
   };
   return map[ext] ?? null;
 }
@@ -1070,9 +1075,17 @@ function isLikelyHeif(b) {
   return ["heic","heix","heif","mif1","msf1","avif","avis"].includes(brand);
 }
 function isLikelyMov(b)  {
-  if (b.length < 8) return false;
+  if (!b || b.length < 8) return false;
   const t = b.slice(4, 8).toString("ascii");
-  return ["ftyp","moov","mdat","free","skip","wide","pnot","cmov"].includes(t);
+
+  // Modern QuickTime files are ISO BMFF and normally start with ftyp.
+  // The QuickTime major brand is "qt  "; do not treat every ftyp file as MOV.
+  if (t === "ftyp") {
+    return b.length >= 12 && b.slice(8, 12).toString("ascii") === "qt  ";
+  }
+
+  // Older QuickTime files can predate ftyp and begin with classic atoms.
+  return ["moov","mdat","free","skip","wide","pnot","cmov"].includes(t);
 }
 function isLikelyMp4(b)  {
   if (b.length < 8) return false;

@@ -11,7 +11,7 @@ This release turns the npm port from a mostly Java-shaped compatibility layer in
 - Added optional, working `enableFfprobeEnhancement` integration with configurable `ffprobePath` to enrich native probe results with external stream/duration data.
 - Added `requireExternalTools` for callers that want ffprobe enhancement failures to be fatal instead of falling back to the native probe.
 - Added `strictProbe` so recognized malformed files can fail explicitly instead of silently degrading to a coarse probe result.
-- Added real video/audio extraction routing through the conversion hub. MP4/MOV -> M4A can remain dependency-free; other target formats can use FFmpeg when enabled.
+- Added video-to-audio conversion routing through the conversion hub. MP4/MOV -> M4A can remain dependency-free; other target formats can use FFmpeg when enabled.
 - Added public root exports for model factories, option factories, `MediaType`, `StreamKind`, and `DefaultCodecMediaEngine`.
 - Added a real Node test suite covering native OGG probing, signature-first detection, strict probing, validation, metadata escaping, WAV/PCM and RF64 conversion, custom converter wiring, ffprobe enhancement, and FFmpeg transcoding.
 - Added the Apache-2.0 `LICENSE` file that package metadata already declared.
@@ -21,7 +21,7 @@ This release turns the npm port from a mostly Java-shaped compatibility layer in
 - Probe routing is now signature-first. Filename extensions are only used as fallback when no known content signature is detected.
 - Conversion source format now follows detected content where possible instead of blindly trusting the source filename extension.
 - Embedded metadata writes now route by detected content instead of only the filename extension.
-- `extractAudio()` now accepts video inputs and can perform real extraction/transcoding when an available conversion route exists.
+- Video-to-audio extraction/transcoding can use the normal `convert()` routes; `extractAudio()` remains audio-input-only for Java compatibility.
 - `DefaultConversionHub` now uses explicit unsupported fallbacks for conversion routes that the dependency-free core cannot perform, instead of presenting an incomplete image-transcode implementation as generally available.
 - Optional FFmpeg is used as a compatibility fallback if the dependency-free MP4/MOV -> M4A remuxer cannot handle a source.
 - `AudioExtractOptions`, `ConversionOptions`, `PlaybackOptions`, and `ValidationOptions` now have JavaScript-friendly no-argument defaults.
@@ -30,6 +30,9 @@ This release turns the npm port from a mostly Java-shaped compatibility layer in
 
 ### Fixed
 
+- Fixed QuickTime/MOV probing so `ftyp` files with the `qt  ` major brand are classified as `video/quicktime` before the broader MP4-family path. Legacy QuickTime atoms remain supported without treating every `ftyp` file as MOV.
+- Fixed strict `.webm` validation falling through as valid when a corrupt file no longer had a recognizable WebM signature; extension dispatch now invokes `WebmParser` and fails malformed input.
+- Restored `extractAudio()` compatibility with the Java-facing contract: non-audio inputs are rejected. Video-to-audio extraction/transcoding remains available through `convert()` when an appropriate route is enabled.
 - Fixed `validate()` incorrectly accepting directories in non-strict mode.
 - Fixed parser exceptions being swallowed inconsistently; `strictProbe` now applies across supported probe formats.
 - Fixed sidecar writes to use atomic replacement.
@@ -59,7 +62,7 @@ npm test
 # fail 0
 ```
 
-Additional smoke checks completed successfully for OGG -> MP3, PNG -> JPEG, MP4 -> MP3 audio extraction, ffprobe-enriched MP4 probing, misleading-extension detection, and escaped sidecar metadata round-trip.
+Additional smoke checks completed successfully for OGG -> MP3, PNG -> JPEG, MP4 -> MP3 conversion, ffprobe-enriched MP4 probing, misleading-extension detection, escaped sidecar metadata round-trip, QuickTime/MOV classification, strict corrupt-WebM rejection, and non-audio `extractAudio()` rejection.
 
 ## 1.1.7 - 2026-06-05
 
