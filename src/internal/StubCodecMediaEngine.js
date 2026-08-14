@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { execSync } from "child_process";
+import { spawnSync } from "child_process";
 import { CodecMediaEngine } from "../CodecMediaEngine.js";
 import { CodecMediaException } from "../CodecMediaException.js";
 
@@ -27,6 +27,8 @@ import { WebmCodec }  from "./video/webm/WebmCodec.js";
 import { Mp3Parser }  from "./audio/mp3/Mp3Parser.js";
 import { Mp3Codec }   from "./audio/mp3/Mp3Codec.js";
 import { Mp3Id3v1Tag } from "./audio/mp3/Mp3Id3v1Tag.js";
+import { OggParser } from "./audio/ogg/OggParser.js";
+import { OggCodec } from "./audio/ogg/OggCodec.js";
 import { AiffParser } from "./audio/aiff/AiffParser.js";
 import { AiffCodec }  from "./audio/aiff/AiffCodec.js";
 import { FlacParser } from "./audio/flac/FlacParser.js";
@@ -45,6 +47,7 @@ import { TiffParser } from "./image/tiff/TiffParser.js";
 import { HeifParser } from "./image/heif/HeifParser.js";
 import { registerImageCodec } from "./convert/ImageTranscodeConverter.js";
 import { DefaultConversionHub } from "./convert/DefaultConversionHub.js";
+import { FfmpegConverter } from "./convert/FfmpegConverter.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -67,8 +70,14 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
    */
   constructor(options = {}) {
     super();
-    this._options = options;
-    this._conversionHub = options.conversionHub ?? new DefaultConversionHub();
+    this._options = Object.freeze({ ...options });
+    const externalConverter = options.enableFfmpegConversion
+      ? new FfmpegConverter({ ffmpegPath: options.ffmpegPath ?? "ffmpeg" })
+      : null;
+    this._conversionHub = options.conversionHub ?? new DefaultConversionHub({
+      imageToImageConverter: options.imageToImageTranscodeConverter,
+      externalConverter,
+    });
   }
 
   // ── get ────────────────────────────────────────────────────────────────────
@@ -82,6 +91,18 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
 
   /** @param {string} input @returns {import("../model/ProbeResult.js").ProbeResult} */
   probe(input) {
+    const nativeProbe = this._probeNative(input);
+    if (!this._options.enableFfprobeEnhancement) return nativeProbe;
+    return enhanceProbeWithFfprobe(
+      input,
+      nativeProbe,
+      this._options.ffprobePath ?? "ffprobe",
+      Boolean(this._options.requireExternalTools),
+    );
+  }
+
+  /** Native, dependency-free probe implementation. */
+  _probeNative(input) {
     ensureExists(input);
     const ext  = extractExtension(input);
     const size = fs.statSync(input).size;
@@ -94,23 +115,40 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
     }
 
     // ── sniff flags ─────────────────────────────────────────────────────────
-    const likelyMp3  = ext === "mp3"  || isLikelyMp3(prefix);
-    const likelyOgg  = ext === "ogg"  || isLikelyOgg(prefix);
-    const likelyWav  = ext === "wav"  || isLikelyWav(prefix);
-    const likelyAiff = ["aif","aiff","aifc"].includes(ext) || isLikelyAiff(prefix);
-    const likelyFlac = ext === "flac" || isLikelyFlac(prefix);
-    const likelyPng  = ext === "png"  || isLikelyPng(prefix);
-    const likelyJpeg = ["jpg","jpeg"].includes(ext) || isLikelyJpeg(prefix);
-    const likelyWebp = ext === "webp" || isLikelyWebp(prefix);
-    const likelyBmp  = ext === "bmp"  || isLikelyBmp(prefix);
-    const likelyTiff = ["tif","tiff"].includes(ext) || isLikelyTiff(prefix);
-    const likelyHeif = ["heic","heif","avif"].includes(ext) || isLikelyHeif(prefix);
-    const extWantsMp4 = ["mp4","m4a"].includes(ext);
-    const likelyMp4   = extWantsMp4 || isLikelyMp4(prefix);
-    // Avoid MOV false-positives for explicit .mp4/.m4a while still honoring true .mov extension.
-    // isLikelyMov() also matches ftyp-based MP4 containers, so extension intent must arbitrate.
-    const likelyMov   = ext === "mov" || (!extWantsMp4 && isLikelyMov(prefix));
-    const likelyWebm  = ext === "webm" || WebmParser.isLikelyWebm(prefix);
+    // Prefer bytes over the filename. Extension fallback is used only when no
+    // known signature is present, so a renamed PNG called .mp3 is still a PNG.
+    const sniffMp3  = isLikelyMp3(prefix);
+    const sniffOgg  = OggParser.isLikelyOgg(prefix);
+    const sniffWav  = WavParser.isLikelyWav(prefix);
+    const sniffAiff = AiffParser.isLikelyAiff(prefix);
+    const sniffFlac = FlacParser.isLikelyFlac(prefix);
+    const sniffPng  = PngParser.isLikelyPng(prefix);
+    const sniffJpeg = JpegParser.isLikelyJpeg(prefix);
+    const sniffWebp = WebpParser.isLikelyWebp(prefix);
+    const sniffBmp  = BmpParser.isLikelyBmp(prefix);
+    const sniffTiff = TiffParser.isLikelyTiff(prefix);
+    const sniffHeif = HeifParser.isLikelyHeif(prefix);
+    const sniffMp4  = !sniffHeif && Mp4Parser.isLikelyMp4(prefix);
+    const sniffMov  = !sniffHeif && !sniffMp4 && isLikelyMov(prefix);
+    const sniffWebm = WebmParser.isLikelyWebm(prefix);
+    const hasSignature = sniffMp3 || sniffOgg || sniffWav || sniffAiff || sniffFlac ||
+      sniffPng || sniffJpeg || sniffWebp || sniffBmp || sniffTiff || sniffHeif ||
+      sniffMov || sniffMp4 || sniffWebm;
+
+    const likelyMp3  = sniffMp3  || (!hasSignature && ext === "mp3");
+    const likelyOgg  = sniffOgg  || (!hasSignature && ext === "ogg");
+    const likelyWav  = sniffWav  || (!hasSignature && ext === "wav");
+    const likelyAiff = sniffAiff || (!hasSignature && ["aif","aiff","aifc"].includes(ext));
+    const likelyFlac = sniffFlac || (!hasSignature && ext === "flac");
+    const likelyPng  = sniffPng  || (!hasSignature && ext === "png");
+    const likelyJpeg = sniffJpeg || (!hasSignature && ["jpg","jpeg"].includes(ext));
+    const likelyWebp = sniffWebp || (!hasSignature && ext === "webp");
+    const likelyBmp  = sniffBmp  || (!hasSignature && ext === "bmp");
+    const likelyTiff = sniffTiff || (!hasSignature && ["tif","tiff"].includes(ext));
+    const likelyHeif = sniffHeif || (!hasSignature && ["heic","heif","avif"].includes(ext));
+    const likelyMp4  = sniffMp4  || (!hasSignature && ["mp4","m4a"].includes(ext));
+    const likelyMov  = sniffMov  || (!hasSignature && ext === "mov");
+    const likelyWebm = sniffWebm || (!hasSignature && ext === "webm");
 
     const anyKnown = likelyMp3 || likelyOgg || likelyWav || likelyAiff || likelyFlac ||
                      likelyPng || likelyJpeg || likelyWebp || likelyBmp || likelyTiff ||
@@ -145,7 +183,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
               tags: { sizeBytes: String(size), bitrateMode: info.bitrateMode },
             });
           }
-        } catch { /* fall through to stub */ }
+        } catch (e) {
+          if (this._options.strictProbe) throw e;
+        }
       }
       return ProbeResult({ input, mimeType: "audio/mpeg", extension: "mp3",
         mediaType: MediaType.AUDIO, tags: { sizeBytes: String(size) } });
@@ -154,18 +194,17 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
     // ── OGG ─────────────────────────────────────────────────────────────────
     if (likelyOgg) {
       try {
-        const OggCodec = requireParser("OggCodec");
-        if (OggCodec) {
-          const info = OggCodec.decode(bytes, input);
-          return ProbeResult({
-            input, mimeType: "audio/ogg", extension: "ogg", mediaType: MediaType.AUDIO,
-            durationMillis: info.durationMillis,
-            streams: [StreamInfo({ index: 0, kind: StreamKind.AUDIO, codec: info.codec,
-              bitrateKbps: info.bitrateKbps, sampleRate: info.sampleRate, channels: info.channels })],
-            tags: { sizeBytes: String(size), bitrateMode: info.bitrateMode },
-          });
-        }
-      } catch { /* fall through */ }
+        const info = OggCodec.decode(bytes, input);
+        return ProbeResult({
+          input, mimeType: "audio/ogg", extension: "ogg", mediaType: MediaType.AUDIO,
+          durationMillis: info.durationMillis,
+          streams: [StreamInfo({ index: 0, kind: StreamKind.AUDIO, codec: info.codec,
+            bitrateKbps: info.bitrateKbps, sampleRate: info.sampleRate, channels: info.channels })],
+          tags: { sizeBytes: String(size), bitrateMode: info.bitrateMode },
+        });
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType: "audio/ogg", extension: "ogg",
         mediaType: MediaType.AUDIO, tags: { sizeBytes: String(size) } });
     }
@@ -181,7 +220,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
             bitrateKbps: info.bitrateKbps, sampleRate: info.sampleRate, channels: info.channels })],
           tags: { sizeBytes: String(size), bitrateMode: info.bitrateMode, bitsPerSample: String(info.bitsPerSample) },
         });
-      } catch { /* fall through */ }
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType: "audio/wav", extension: "wav",
         mediaType: MediaType.AUDIO, tags: { sizeBytes: String(size) } });
     }
@@ -201,7 +242,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
             tags: { sizeBytes: String(size), bitrateMode: info.bitrateMode },
           });
         }
-      } catch { /* fall through */ }
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType: "audio/aiff", extension: aiffExt,
         mediaType: MediaType.AUDIO, tags: { sizeBytes: String(size) } });
     }
@@ -221,7 +264,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
               bitsPerSample: String(info.bitsPerSample) },
           });
         }
-      } catch { /* fall through */ }
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType: "audio/flac", extension: "flac",
         mediaType: MediaType.AUDIO, tags: { sizeBytes: String(size) } });
     }
@@ -240,7 +285,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
               colorType: String(info.colorType) },
           });
         }
-      } catch { /* fall through */ }
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType: "image/png", extension: "png",
         mediaType: MediaType.IMAGE, tags: { sizeBytes: String(size) } });
     }
@@ -260,7 +307,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
               channels: String(info.channels) },
           });
         }
-      } catch { /* fall through */ }
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType: "image/jpeg", extension: jpegExt,
         mediaType: MediaType.IMAGE, tags: { sizeBytes: String(size) } });
     }
@@ -280,7 +329,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
             tags,
           });
         }
-      } catch { /* fall through */ }
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType: "image/webp", extension: "webp",
         mediaType: MediaType.IMAGE, tags: { sizeBytes: String(size) } });
     }
@@ -298,7 +349,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
             tags: { sizeBytes: String(size), bitsPerPixel: String(info.bitsPerPixel) },
           });
         }
-      } catch { /* fall through */ }
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType: "image/bmp", extension: "bmp",
         mediaType: MediaType.IMAGE, tags: { sizeBytes: String(size) } });
     }
@@ -319,7 +372,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
             tags,
           });
         }
-      } catch { /* fall through */ }
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType: "image/tiff", extension: tiffExt,
         mediaType: MediaType.IMAGE, tags: { sizeBytes: String(size) } });
     }
@@ -343,7 +398,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
           return ProbeResult({ input, mimeType, extension: heifExt,
             mediaType: MediaType.IMAGE, streams, tags });
         }
-      } catch { /* fall through */ }
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType, extension: heifExt,
         mediaType: MediaType.IMAGE, tags: { sizeBytes: String(size) } });
     }
@@ -376,7 +433,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
           return ProbeResult({ input, mimeType: "video/quicktime", extension: "mov",
             mediaType: MediaType.VIDEO, durationMillis: info.durationMillis, streams, tags });
         }
-      } catch { /* fall through */ }
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType: "video/quicktime", extension: "mov",
         mediaType: MediaType.VIDEO, tags: { sizeBytes: String(size) } });
     }
@@ -409,7 +468,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
         }
         return ProbeResult({ input, mimeType: mp4Mime, extension: mp4Ext,
           mediaType: mp4Media, durationMillis: info.durationMillis, streams, tags });
-      } catch { /* fall through */ }
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType: mp4Mime, extension: mp4Ext,
         mediaType: mp4Media, tags: { sizeBytes: String(size) } });
     }
@@ -438,7 +499,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
         }
         return ProbeResult({ input, mimeType: "video/webm", extension: "webm",
           mediaType: MediaType.VIDEO, durationMillis: info.durationMillis, streams, tags });
-      } catch { /* fall through */ }
+      } catch (e) {
+        if (this._options.strictProbe) throw e;
+      }
       return ProbeResult({ input, mimeType: "video/webm", extension: "webm",
         mediaType: MediaType.VIDEO, tags: { sizeBytes: String(size) } });
     }
@@ -466,10 +529,10 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
         const raw = fs.readFileSync(sidecar, "utf8");
         for (const line of raw.split(/\r?\n/)) {
           if (!line || line.startsWith("#")) continue;
-          const eq = line.indexOf("=");
+          const eq = findPropertiesSeparator(line);
           if (eq < 0) continue;
-          const k = line.slice(0, eq).trim();
-          const v = line.slice(eq + 1).trim();
+          const k = unescapeProps(line.slice(0, eq).trim());
+          const v = unescapeProps(line.slice(eq + 1).trim());
           if (k && !(k in entries)) entries[k] = v;  // putIfAbsent
         }
       } catch (e) {
@@ -492,7 +555,9 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
       if (v == null)  throw new CodecMediaException(`Metadata value must not be null for key: ${k}`);
     }
 
-    const extension = normalizeExt(extractExtension(input));
+    // Route embedded metadata by detected content, not by filename alone.
+    const detected = this.probe(input);
+    const extension = normalizeExt(detected.extension) || normalizeExt(extractExtension(input));
     if (extension === "wav") {
       try {
         const withMetadata = WavParser.writeInfoMetadata(fs.readFileSync(input), metadata.entries);
@@ -538,7 +603,7 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
 
     const sidecar = sidecarPath(input);
     try {
-      fs.writeFileSync(sidecar, lines.join("\n") + "\n", "utf8");
+      writeFileAtomically(sidecar, Buffer.from(lines.join("\n") + "\n", "utf8"));
     } catch (e) {
       throw new CodecMediaException(`Failed to write metadata sidecar: ${sidecar}`, e);
     }
@@ -556,26 +621,39 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
     ensureExists(input);
     if (!outputDir) throw new CodecMediaException("Output directory is required");
 
-    const probe     = this.probe(input);
-    const effective = options ?? AudioExtractOptions.defaults(normalizeExt(probe.extension));
-
-    if (probe.mediaType !== MediaType.AUDIO)
-      throw new CodecMediaException(`Input is not an audio file: ${input}`);
-
-    const srcExt = normalizeExt(probe.extension);
-    const reqExt = normalizeExt(effective.targetFormat) || srcExt;
-    if (reqExt !== srcExt) {
-      throw new CodecMediaException(
-        `Audio extraction does not support format conversion yet. Requested format '${reqExt}' must match source format '${srcExt}'`
-      );
+    const probe = this.probe(input);
+    if (probe.mediaType !== MediaType.AUDIO && probe.mediaType !== MediaType.VIDEO) {
+      throw new CodecMediaException(`Input has no extractable audio media type: ${input}`);
     }
+
+    const srcExt = normalizeExt(probe.extension) || normalizeExt(extractExtension(input));
+    const effective = options ?? AudioExtractOptions.defaults(
+      probe.mediaType === MediaType.VIDEO ? "m4a" : srcExt
+    );
+    const reqExt = normalizeExt(effective.targetFormat) ||
+      (probe.mediaType === MediaType.VIDEO ? "m4a" : srcExt);
 
     try {
       fs.mkdirSync(outputDir, { recursive: true });
-      const base       = baseName(path.basename(input));
-      const outputFile = path.join(outputDir, `${base}_audio.${srcExt}`);
-      fs.copyFileSync(input, outputFile);
-      return ExtractionResult({ outputFile, format: srcExt });
+      const base = baseName(path.basename(input));
+      const outputFile = path.join(outputDir, `${base}_audio.${reqExt}`);
+
+      if (probe.mediaType === MediaType.AUDIO && reqExt === srcExt) {
+        fs.copyFileSync(input, outputFile);
+        return ExtractionResult({ outputFile, format: srcExt });
+      }
+
+      // Reuse the normal conversion routes. MP4/MOV -> M4A can use the
+      // dependency-free remuxer; other extraction/transcode routes can use the
+      // optional FFmpeg bridge when enabled.
+      this.convert(input, outputFile, {
+        targetFormat: reqExt,
+        preset: "balanced",
+        overwrite: true,
+        audioBitrateKbps: effective.bitrateKbps,
+        streamIndex: effective.streamIndex,
+      });
+      return ExtractionResult({ outputFile, format: reqExt });
     } catch (e) {
       if (e instanceof CodecMediaException) throw e;
       throw new CodecMediaException(`Failed to extract audio: ${input}`, e);
@@ -594,7 +672,8 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
     ensureExists(input);
     if (!output) throw new CodecMediaException("Output file is required");
 
-    const srcExt          = normalizeExt(extractExtension(input));
+    const sourceProbe     = this.probe(input);
+    const srcExt          = normalizeExt(sourceProbe.extension) || normalizeExt(extractExtension(input));
     const inferredTarget  = extractExtension(output);
     const effective       = options ?? ConversionOptions.defaults(inferredTarget);
 
@@ -609,7 +688,6 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
       );
     }
 
-    const sourceProbe    = this.probe(input);
     const targetMedia    = mediaTypeByExtension(reqExt);
 
     if (!this._conversionHub) {
@@ -686,7 +764,11 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
     }
 
     try {
-      const size = fs.statSync(input).size;
+      const stat = fs.statSync(input);
+      if (!stat.isFile()) {
+        return ValidationResult({ valid: false, errors: [`Input must be a regular file: ${input}`] });
+      }
+      const size = stat.size;
 
       if (effective.maxBytes > 0 && size > effective.maxBytes) {
         return ValidationResult({
@@ -726,37 +808,37 @@ export class StubCodecMediaEngine extends CodecMediaEngine {
  * @returns {string|null}
  */
 function runStrictParser(ext, bytes) {
+  const parserKey = parserKeyBySignature(bytes) ?? parserKeyForExt(ext);
+  if (parserKey == null) return null;
   try {
-    switch (ext) {
-      case "wav": {
-        WavParser.parse(bytes);
-        return null;
-      }
-      case "mp3": {
-        Mp3Parser.parse(bytes);
-        return null;
-      }
-      case "mp4":
-      case "m4a": {
-        Mp4Parser.parse(bytes);
-        return null;
-      }
-      case "webm": {
-        WebmParser.parse(bytes);
-        return null;
-      }
-      // Remaining parsers delegated to lazy-loaded modules when ported:
-      default: {
-        const parser = requireParser(parserKeyForExt(ext));
-        if (!parser) return null; // parser not yet ported — skip strict check
-        const parseMethod = parser.parse ?? parser.decode;
-        if (typeof parseMethod === "function") parseMethod.call(parser, bytes);
-        return null;
-      }
+    const parser = requireParser(parserKey);
+    if (!parser) return `Strict validation is not available for ${ext || "detected format"}`;
+    const parseMethod = parser.parse ?? parser.decode;
+    if (typeof parseMethod !== "function") {
+      return `Strict validation parser has no parse/decode method: ${parserKey}`;
     }
+    parseMethod.call(parser, bytes);
+    return null;
   } catch (e) {
-    return `Strict validation failed for ${ext}: ${e.message}`;
+    return `Strict validation failed for ${ext || parserKey}: ${e.message}`;
   }
+}
+
+function parserKeyBySignature(bytes) {
+  if (Mp3Parser.isLikelyMp3?.(bytes) || isLikelyMp3(bytes)) return "Mp3Parser";
+  if (OggParser.isLikelyOgg(bytes)) return "OggParser";
+  if (WavParser.isLikelyWav(bytes)) return "WavParser";
+  if (AiffParser.isLikelyAiff(bytes)) return "AiffParser";
+  if (FlacParser.isLikelyFlac(bytes)) return "FlacParser";
+  if (PngParser.isLikelyPng(bytes)) return "PngParser";
+  if (JpegParser.isLikelyJpeg(bytes)) return "JpegParser";
+  if (WebpParser.isLikelyWebp(bytes)) return "WebpParser";
+  if (BmpParser.isLikelyBmp(bytes)) return "BmpParser";
+  if (TiffParser.isLikelyTiff(bytes)) return "TiffParser";
+  if (HeifParser.isLikelyHeif(bytes)) return "HeifParser";
+  if (WebmParser.isLikelyWebm(bytes)) return "WebmParser";
+  if (Mp4Parser.isLikelyMp4(bytes) || isLikelyMov(bytes)) return "Mp4Parser";
+  return null;
 }
 
 function parserKeyForExt(ext) {
@@ -765,7 +847,7 @@ function parserKeyForExt(ext) {
     aif: "AiffParser", aiff: "AiffParser", aifc: "AiffParser",
     flac: "FlacParser", png: "PngParser",
     jpg: "JpegParser", jpeg: "JpegParser",
-    mov: "MovParser", mp4: "Mp4Parser", m4a: "Mp4Parser",
+    mov: "Mp4Parser", mp4: "Mp4Parser", m4a: "Mp4Parser",
     webp: "WebpParser", bmp: "BmpParser",
     tif: "TiffParser", tiff: "TiffParser",
     heic: "HeifParser", heif: "HeifParser", avif: "HeifParser",
@@ -799,6 +881,8 @@ registerParser("FlacParser", FlacParser);
 registerParser("FlacCodec", FlacCodec);
 registerParser("Mp3Parser", Mp3Parser);
 registerParser("Mp3Codec", Mp3Codec);
+registerParser("OggParser", OggParser);
+registerParser("OggCodec", OggCodec);
 registerParser("Mp4Parser", Mp4Parser);
 registerParser("Mp4Codec", Mp4Codec);
 registerParser("WavParser", WavParser);
@@ -857,6 +941,8 @@ function readEmbeddedMetadata(filePath, extension) {
         return Mp3Id3v1Tag.read(bytes);
       case "flac":
         return FlacParser.readVorbisCommentMetadata(bytes);
+      case "ogg":
+        return OggParser.readCommentMetadata(bytes);
       default:
         return {};
     }
@@ -898,14 +984,64 @@ function baseName(fileName) {
 
 // Java Properties-style escape (minimal: newline and backslash)
 function escapeProps(s) {
-  return String(s).replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r");
+  return String(s)
+    .replace(/\\/g, "\\\\")
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/=/g, "\\=");
+}
+
+function unescapeProps(s) {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== "\\" || i + 1 >= s.length) {
+      out += s[i];
+      continue;
+    }
+    const next = s[++i];
+    if (next === "n") out += "\n";
+    else if (next === "r") out += "\r";
+    else out += next;
+  }
+  return out;
+}
+
+function findPropertiesSeparator(line) {
+  let escaped = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === "=") return i;
+  }
+  return -1;
 }
 
 function openWithSystem(filePath) {
   const platform = os.platform();
-  if (platform === "darwin")      execSync(`open "${filePath}"`);
-  else if (platform === "win32")  execSync(`start "" "${filePath}"`, { shell: true });
-  else                            execSync(`xdg-open "${filePath}"`);
+  let command;
+  let args;
+  if (platform === "darwin") {
+    command = "open";
+    args = [filePath];
+  } else if (platform === "win32") {
+    command = "cmd.exe";
+    args = ["/d", "/s", "/c", "start", "", filePath];
+  } else {
+    command = "xdg-open";
+    args = [filePath];
+  }
+  const result = spawnSync(command, args, { stdio: "ignore", windowsHide: true });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`${command} exited with status ${result.status}`);
+  }
 }
 
 // ─── Byte-level sniff helpers (for formats with no dedicated parser yet) ──────
@@ -915,7 +1051,6 @@ function isLikelyMp3(b)  {
   if (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) return true; // ID3
   return b.length >= 2 && (b[0] & 0xff) === 0xff && (b[1] & 0xe0) === 0xe0;
 }
-function isLikelyOgg(b)  { return b.length >= 4 && b[0] === 0x4f && b[1] === 0x67 && b[2] === 0x67 && b[3] === 0x53; }
 function isLikelyWav(b)  {
   if (b.length < 12) return false;
   const riff = b.slice(0, 4).toString("ascii");
@@ -925,7 +1060,7 @@ function isLikelyWav(b)  {
 function isLikelyAiff(b) { return b.length >= 12 && b[0]===0x46&&b[1]===0x4f&&b[2]===0x52&&b[3]===0x4d && (b[8]===0x41&&b[9]===0x49&&b[10]===0x46&&b[11]===0x46 || b[8]===0x41&&b[9]===0x49&&b[10]===0x46&&b[11]===0x43); }
 function isLikelyFlac(b) { return b.length >= 4 && b[0]===0x66&&b[1]===0x4c&&b[2]===0x61&&b[3]===0x43; }
 function isLikelyPng(b)  { return b.length >= 8 && b[0]===0x89&&b[1]===0x50&&b[2]===0x4e&&b[3]===0x47&&b[4]===0x0d&&b[5]===0x0a&&b[6]===0x1a&&b[7]===0x0a; }
-function isLikelyJpeg(b) { return b.length >= 3 && b[0]===0xff&&b[1]===0xd8&&b[2]===0xff; }
+function isLikelyJpeg(b) { return JpegParser.isLikelyJpeg(b); }
 function isLikelyWebp(b) { return b.length >= 12 && b[0]===0x52&&b[1]===0x49&&b[2]===0x46&&b[3]===0x46 && b[8]===0x57&&b[9]===0x45&&b[10]===0x42&&b[11]===0x50; }
 function isLikelyBmp(b)  { return b.length >= 2 && b[0]===0x42&&b[1]===0x4d; }
 function isLikelyTiff(b) { return b.length >= 4 && ((b[0]===0x49&&b[1]===0x49&&b[2]===0x2a&&b[3]===0x00) || (b[0]===0x4d&&b[1]===0x4d&&b[2]===0x00&&b[3]===0x2a)); }
@@ -945,6 +1080,109 @@ function isLikelyMp4(b)  {
   if (t !== "ftyp") return false;
   const brand = b.slice(8, 12).toString("ascii");
   return isSupportedMp4MajorBrand(brand);
+}
+
+function enhanceProbeWithFfprobe(input, nativeProbe, ffprobePath, requireExternalTools = false) {
+  const result = spawnSync(ffprobePath, [
+    "-v", "error",
+    "-show_format",
+    "-show_streams",
+    "-of", "json",
+    input,
+  ], {
+    encoding: "utf8",
+    windowsHide: true,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+
+  if (result.error) {
+    if (requireExternalTools) {
+      throw new CodecMediaException(`Failed to execute ffprobe (${ffprobePath}): ${result.error.message}`, result.error);
+    }
+    return nativeProbe;
+  }
+  if (result.status !== 0) {
+    if (requireExternalTools) {
+      const detail = String(result.stderr || result.stdout || "ffprobe failed").trim();
+      throw new CodecMediaException(`ffprobe failed: ${detail}`);
+    }
+    return nativeProbe;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout || "{}");
+  } catch (e) {
+    if (requireExternalTools) throw new CodecMediaException("ffprobe returned invalid JSON", e);
+    return nativeProbe;
+  }
+
+  const streams = [];
+  for (const stream of Array.isArray(parsed.streams) ? parsed.streams : []) {
+    const kind = stream.codec_type === "audio"
+      ? StreamKind.AUDIO
+      : stream.codec_type === "video"
+        ? StreamKind.VIDEO
+        : null;
+    if (kind == null) continue;
+
+    const bitrate = positiveNumber(stream.bit_rate);
+    const sampleRate = positiveNumber(stream.sample_rate);
+    const channels = positiveNumber(stream.channels);
+    const width = positiveNumber(stream.width);
+    const height = positiveNumber(stream.height);
+    const frameRate = parseFrameRate(stream.avg_frame_rate) ?? parseFrameRate(stream.r_frame_rate);
+    streams.push(StreamInfo({
+      index: Number.isInteger(Number(stream.index)) ? Number(stream.index) : streams.length,
+      kind,
+      codec: String(stream.codec_name || stream.codec_long_name || "unknown"),
+      bitrateKbps: bitrate == null ? null : Math.round(bitrate / 1000),
+      sampleRate,
+      channels,
+      width,
+      height,
+      frameRate,
+    }));
+  }
+
+  const durationSeconds = positiveNumber(parsed?.format?.duration);
+  const durationMillis = durationSeconds == null
+    ? nativeProbe.durationMillis
+    : Math.round(durationSeconds * 1000);
+  const tags = { ...nativeProbe.tags };
+  if (parsed?.format?.format_name) tags.ffprobeFormat = String(parsed.format.format_name);
+  const containerBitrate = positiveNumber(parsed?.format?.bit_rate);
+  if (containerBitrate != null) tags.containerBitrateKbps = String(Math.round(containerBitrate / 1000));
+
+  return ProbeResult({
+    input: nativeProbe.input,
+    mimeType: nativeProbe.mimeType,
+    extension: nativeProbe.extension,
+    mediaType: nativeProbe.mediaType,
+    durationMillis,
+    streams: streams.length > 0 ? streams : nativeProbe.streams,
+    tags,
+  });
+}
+
+function positiveNumber(value) {
+  if (value == null || value === "" || value === "N/A") return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function parseFrameRate(value) {
+  if (value == null || value === "" || value === "0/0") return null;
+  if (typeof value === "number") return Number.isFinite(value) && value > 0 ? value : null;
+  const text = String(value);
+  if (text.includes("/")) {
+    const [numText, denText] = text.split("/", 2);
+    const num = Number(numText);
+    const den = Number(denText);
+    if (Number.isFinite(num) && Number.isFinite(den) && num > 0 && den > 0) return num / den;
+    return null;
+  }
+  return positiveNumber(text);
 }
 
 // ─── MIME / MediaType maps ─────────────────────────────────────────────────────
