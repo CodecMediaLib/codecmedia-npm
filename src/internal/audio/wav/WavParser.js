@@ -25,97 +25,95 @@ export class WavParser {
    * @returns {import("./WavProbeInfo.js").WavProbeInfo}
    */
   static parse(bytes) {
-    if (!bytes || bytes.length < 12) {
-      throw new CodecMediaException("Invalid WAV data: too small");
-    }
-
-    const riffId = ascii(bytes, 0, 4);
-    const waveId = ascii(bytes, 8, 4);
-    if (waveId !== WAVE || (riffId !== RIFF && riffId !== RF64 && riffId !== RIFX)) {
+    if (!WavParser.isLikelyWav(bytes)) {
       throw new CodecMediaException("Not a WAV/RIFF file");
     }
 
+    const riffId = ascii(bytes, 0, 4);
     const littleEndian = riffId !== RIFX;
-
+    const isRf64 = riffId === RF64;
     let offset = 12;
+    let audioFormat = null;
     let channels = null;
     let sampleRate = null;
-    let bitsPerSample = null;
-    let blockAlign = null;
     let byteRate = null;
-    let dataBytes = 0n;
-    let sawData = false;
+    let bitsPerSample = null;
+    let dataSize = null;
+    let ds64DataSize = null;
 
     while (offset + 8 <= bytes.length) {
       const chunkId = ascii(bytes, offset, 4);
-      const chunkSizeU32 = readU32(bytes, offset + 4, littleEndian);
-      const chunkSize = BigInt(chunkSizeU32);
+      const chunkSize = readU32(bytes, offset + 4, littleEndian);
       const chunkDataStart = offset + 8;
+      const chunkDataEnd = chunkDataStart + chunkSize;
 
-      if (chunkDataStart > bytes.length) {
-        throw new CodecMediaException("Invalid WAV chunk layout");
-      }
-
-      const remaining = BigInt(bytes.length - chunkDataStart);
-      if (chunkSize > remaining) {
-        throw new CodecMediaException(`WAV chunk exceeds file bounds: ${chunkId}`);
-      }
-
-      if (chunkId === "fmt ") {
-        if (chunkSizeU32 < 16) {
-          throw new CodecMediaException("WAV fmt chunk is too small");
+      if (chunkDataEnd < chunkDataStart || chunkDataEnd > bytes.length) {
+        if (!(isRf64 && chunkId === "data" && chunkSize === 0xffffffff && ds64DataSize != null)) {
+          throw new CodecMediaException(`WAV chunk exceeds file bounds: ${chunkId}`);
         }
+      }
 
-        const formatTag = readU16(bytes, chunkDataStart + 0, littleEndian);
+      if (chunkId === "ds64") {
+        if (!isRf64 || chunkSize < 16 || chunkDataStart + 16 > bytes.length) {
+          throw new CodecMediaException("Invalid RF64 ds64 chunk");
+        }
+        const value = Buffer.from(bytes).readBigUInt64LE(chunkDataStart + 8);
+        if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+          throw new CodecMediaException("RF64 data size is too large");
+        }
+        ds64DataSize = Number(value);
+      } else if (chunkId === "fmt ") {
+        if (chunkSize < 16) throw new CodecMediaException("WAV fmt chunk is too small");
+        audioFormat = readU16(bytes, chunkDataStart, littleEndian);
         channels = readU16(bytes, chunkDataStart + 2, littleEndian);
         sampleRate = readU32(bytes, chunkDataStart + 4, littleEndian);
         byteRate = readU32(bytes, chunkDataStart + 8, littleEndian);
-        blockAlign = readU16(bytes, chunkDataStart + 12, littleEndian);
         bitsPerSample = readU16(bytes, chunkDataStart + 14, littleEndian);
-
-        // WAVE_FORMAT_EXTENSIBLE stores the valid bits/sample at +18 (if present),
-        // and we can keep container bitsPerSample from +14 for stream math.
-        // formatTag accepted broadly (PCM/IEEE float/alaw/mulaw/extensible/etc.)
-        if (formatTag === 0 || channels <= 0 || sampleRate <= 0) {
-          throw new CodecMediaException("Invalid WAV format values");
-        }
+        validateSupportedAudioFormat(audioFormat, bytes, chunkDataStart, chunkSize, littleEndian);
       } else if (chunkId === "data") {
-        sawData = true;
-        dataBytes += chunkSize;
+        if (isRf64 && chunkSize === 0xffffffff) {
+          if (ds64DataSize == null) {
+            throw new CodecMediaException("RF64 data chunk uses 0xFFFFFFFF size but ds64 is missing");
+          }
+          dataSize = ds64DataSize;
+        } else {
+          dataSize = chunkSize;
+        }
       }
 
-      const padded = Number(chunkSize + (chunkSize & 1n));
-      offset = chunkDataStart + padded;
+      let effectiveChunkSize = chunkSize;
+      if (isRf64 && chunkId === "data" && chunkSize === 0xffffffff) {
+        const available = bytes.length - chunkDataStart;
+        const expected = ds64DataSize ?? available;
+        if (expected < 0 || expected > available) {
+          throw new CodecMediaException("RF64 data chunk exceeds file bounds");
+        }
+        effectiveChunkSize = expected;
+      }
+
+      const padded = effectiveChunkSize + (effectiveChunkSize & 1);
+      const nextOffset = chunkDataStart + padded;
+      if (!Number.isSafeInteger(nextOffset) || nextOffset < chunkDataStart || nextOffset > bytes.length) {
+        throw new CodecMediaException(`WAV chunk exceeds file bounds: ${chunkId}`);
+      }
+      offset = nextOffset;
     }
 
-    if (!sawData) {
-      throw new CodecMediaException("WAV is missing data chunk");
-    }
-    if (channels == null || sampleRate == null || bitsPerSample == null) {
-      throw new CodecMediaException("WAV is missing required fmt chunk");
+    if (audioFormat == null || channels == null || sampleRate == null || bitsPerSample == null || dataSize == null) {
+      throw new CodecMediaException("WAV is missing required fmt/data chunks");
     }
     if (channels <= 0 || sampleRate <= 0 || bitsPerSample <= 0) {
       throw new CodecMediaException("Invalid WAV format values");
     }
 
-    let effectiveByteRate = byteRate && byteRate > 0 ? BigInt(byteRate) : 0n;
-    if (effectiveByteRate <= 0n && blockAlign && blockAlign > 0) {
-      effectiveByteRate = BigInt(sampleRate) * BigInt(blockAlign);
-    }
-    if (effectiveByteRate <= 0n) {
-      effectiveByteRate = (BigInt(sampleRate) * BigInt(channels) * BigInt(bitsPerSample)) / 8n;
-    }
-    if (effectiveByteRate <= 0n) {
-      throw new CodecMediaException("Invalid WAV byte rate");
-    }
-
-    const durationMillis = Number((dataBytes * 1000n) / effectiveByteRate);
-    const bitrateKbps = Number((effectiveByteRate * 8n) / 1000n);
+    const computedByteRate = Math.floor(sampleRate * channels * bitsPerSample / 8);
+    const effectiveByteRate = byteRate > 0 ? byteRate : computedByteRate;
+    if (effectiveByteRate <= 0) throw new CodecMediaException("Invalid WAV byte rate");
 
     return WavProbeInfo({
-      codec: "pcm",
-      durationMillis,
-      bitrateKbps,
+      codec: audioFormat === 0x0003 ? "pcm-float" : "pcm",
+      durationMillis: Math.floor((dataSize * 1000) / effectiveByteRate),
+      bitrateKbps: Math.floor((effectiveByteRate * 8) / 1000),
       sampleRate,
       channels,
       bitsPerSample,
@@ -140,25 +138,53 @@ export class WavParser {
     }
 
     const out = {};
+    const riffId = ascii(bytes, 0, 4);
+    const littleEndian = riffId !== RIFX;
+    const isRf64 = riffId === RF64;
+    let ds64DataSize = null;
     let offset = 12;
     while (offset + 8 <= bytes.length) {
       const chunkId = ascii(bytes, offset, 4);
-      const chunkSize = readU32(bytes, offset + 4, true);
+      const rawChunkSize = readU32(bytes, offset + 4, littleEndian);
       const chunkDataStart = offset + 8;
+
+      if (chunkId === "ds64") {
+        if (!isRf64 || rawChunkSize < 16 || chunkDataStart + 16 > bytes.length) {
+          throw new CodecMediaException("Invalid RF64 ds64 chunk");
+        }
+        const value = Buffer.from(bytes).readBigUInt64LE(chunkDataStart + 8);
+        if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+          throw new CodecMediaException("RF64 data size is too large");
+        }
+        ds64DataSize = Number(value);
+      }
+
+      let chunkSize = rawChunkSize;
+      if (isRf64 && chunkId === "data" && rawChunkSize === 0xffffffff) {
+        if (ds64DataSize == null) {
+          throw new CodecMediaException("RF64 data chunk uses 0xFFFFFFFF size but ds64 is missing");
+        }
+        chunkSize = ds64DataSize;
+      }
+
       const chunkDataEnd = chunkDataStart + chunkSize;
-      if (chunkDataEnd < chunkDataStart || chunkDataEnd > bytes.length) {
+      if (!Number.isSafeInteger(chunkDataEnd) || chunkDataEnd < chunkDataStart || chunkDataEnd > bytes.length) {
         throw new CodecMediaException(`WAV chunk exceeds file bounds: ${chunkId}`);
       }
 
       if (chunkId === "LIST" && chunkSize >= 4) {
         const listType = ascii(bytes, chunkDataStart, 4);
         if (listType === "INFO") {
-          readInfoListEntries(bytes, chunkDataStart + 4, chunkDataEnd, out);
+          readInfoListEntries(bytes, chunkDataStart + 4, chunkDataEnd, out, littleEndian);
         }
       }
 
-      const padded = chunkSize % 2 === 0 ? chunkSize : chunkSize + 1;
-      offset = chunkDataStart + padded;
+      const padded = chunkSize + (chunkSize & 1);
+      const nextOffset = chunkDataStart + padded;
+      if (!Number.isSafeInteger(nextOffset) || nextOffset < chunkDataStart || nextOffset > bytes.length) {
+        throw new CodecMediaException(`WAV chunk exceeds file bounds: ${chunkId}`);
+      }
+      offset = nextOffset;
     }
 
     return out;
@@ -168,8 +194,9 @@ export class WavParser {
     if (!WavParser.isLikelyWav(bytes)) {
       throw new CodecMediaException("Not a WAV/RIFF file");
     }
-    if (ascii(bytes, 0, 4) === RF64) {
-      throw new CodecMediaException("RF64 metadata writing is not supported");
+    const container = ascii(bytes, 0, 4);
+    if (container === RF64 || container === RIFX) {
+      throw new CodecMediaException(`${container} metadata writing is not supported`);
     }
 
     const keptChunks = [];
@@ -219,6 +246,34 @@ export class WavParser {
   }
 }
 
+
+function validateSupportedAudioFormat(audioFormat, bytes, fmtOffset, fmtChunkSize, littleEndian) {
+  const PCM = 0x0001;
+  const IEEE_FLOAT = 0x0003;
+  const EXTENSIBLE = 0xfffe;
+  if (audioFormat === PCM || audioFormat === IEEE_FLOAT) return;
+  if (audioFormat !== EXTENSIBLE) {
+    throw new CodecMediaException(`Unsupported WAV audio format: 0x${audioFormat.toString(16)}`);
+  }
+  if (fmtChunkSize < 40) throw new CodecMediaException("Invalid WAV extensible fmt chunk");
+  const cbSize = readU16(bytes, fmtOffset + 16, littleEndian);
+  if (cbSize < 22) throw new CodecMediaException("Invalid WAV extensible fmt extension size");
+
+  const subFormatOffset = fmtOffset + 24;
+  const subType = readU16(bytes, subFormatOffset, littleEndian);
+  // KSDATAFORMAT_SUBTYPE_PCM / IEEE_FLOAT GUID tail. RIFX extensible is rare; the GUID itself remains byte-defined.
+  const validGuid = bytes[subFormatOffset + 2] === 0x00 && bytes[subFormatOffset + 3] === 0x00 &&
+    bytes[subFormatOffset + 4] === 0x00 && bytes[subFormatOffset + 5] === 0x00 &&
+    bytes[subFormatOffset + 6] === 0x10 && bytes[subFormatOffset + 7] === 0x00 &&
+    bytes[subFormatOffset + 8] === 0x80 && bytes[subFormatOffset + 9] === 0x00 &&
+    bytes[subFormatOffset + 10] === 0x00 && bytes[subFormatOffset + 11] === 0xaa &&
+    bytes[subFormatOffset + 12] === 0x00 && bytes[subFormatOffset + 13] === 0x38 &&
+    bytes[subFormatOffset + 14] === 0x9b && bytes[subFormatOffset + 15] === 0x71;
+  if (!validGuid || (subType !== PCM && subType !== IEEE_FLOAT)) {
+    throw new CodecMediaException(`Unsupported WAV extensible sub-format: 0x${subType.toString(16)}`);
+  }
+}
+
 function ascii(bytes, offset, len) {
   if (offset < 0 || offset + len > bytes.length) return "";
   return Buffer.from(bytes).subarray(offset, offset + len).toString("ascii");
@@ -247,11 +302,11 @@ function readU32(bytes, offset, littleEndian) {
     : (b3 | (b2 << 8) | (b1 << 16) | (b0 << 24)) >>> 0;
 }
 
-function readInfoListEntries(bytes, offset, limit, out) {
+function readInfoListEntries(bytes, offset, limit, out, littleEndian = true) {
   let pos = offset;
   while (pos + 8 <= limit) {
     const id = ascii(bytes, pos, 4);
-    const size = readU32(bytes, pos + 4, true);
+    const size = readU32(bytes, pos + 4, littleEndian);
     const dataStart = pos + 8;
     const dataEnd = dataStart + size;
     if (dataEnd < dataStart || dataEnd > limit) {
