@@ -48,20 +48,40 @@ function extractWavDataChunk(wavBytes) {
   if (wavBytes.length < 12) throw new CodecMediaException("Invalid WAV: file too small");
   const riff = ascii(wavBytes, 0, 4);
   const wave = ascii(wavBytes, 8, 4);
-  if ((riff !== "RIFF" && riff !== "RF64") || wave !== "WAVE") {
+  const isRf64 = riff === "RF64";
+  if ((riff !== "RIFF" && !isRf64) || wave !== "WAVE") {
     throw new CodecMediaException("Invalid WAV header");
   }
 
   let offset = 12;
   let sawFmt = false;
+  let ds64DataSize = null;
   while (offset + 8 <= wavBytes.length) {
     const chunkId = ascii(wavBytes, offset, 4);
-    const chunkSize = readLeInt(wavBytes, offset + 4);
-    if (chunkSize < 0) throw new CodecMediaException("Unsupported WAV chunk size");
-
+    const rawChunkSize = readLeUInt32(wavBytes, offset + 4);
     const dataStart = offset + 8;
+
+    if (chunkId === "ds64") {
+      if (!isRf64 || rawChunkSize < 16 || dataStart + 16 > wavBytes.length) {
+        throw new CodecMediaException("Invalid RF64 ds64 chunk");
+      }
+      const value = Buffer.from(wavBytes).readBigUInt64LE(dataStart + 8);
+      if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new CodecMediaException("RF64 data size is too large");
+      }
+      ds64DataSize = Number(value);
+    }
+
+    let chunkSize = rawChunkSize;
+    if (isRf64 && chunkId === "data" && rawChunkSize === 0xffffffff) {
+      if (ds64DataSize == null) {
+        throw new CodecMediaException("RF64 data chunk uses 0xFFFFFFFF size but ds64 is missing");
+      }
+      chunkSize = ds64DataSize;
+    }
+
     const dataEnd = dataStart + chunkSize;
-    if (dataEnd > wavBytes.length) {
+    if (!Number.isSafeInteger(dataEnd) || dataEnd < dataStart || dataEnd > wavBytes.length) {
       throw new CodecMediaException(`WAV chunk exceeds file bounds: ${chunkId}`);
     }
 
@@ -79,8 +99,12 @@ function extractWavDataChunk(wavBytes) {
       return Buffer.from(wavBytes).subarray(dataStart, dataEnd);
     }
 
-    const padded = chunkSize % 2 === 0 ? chunkSize : chunkSize + 1;
-    offset = dataStart + padded;
+    const padded = chunkSize + (chunkSize & 1);
+    const nextOffset = dataStart + padded;
+    if (!Number.isSafeInteger(nextOffset) || nextOffset < dataStart || nextOffset > wavBytes.length) {
+      throw new CodecMediaException("WAV chunk offset overflow");
+    }
+    offset = nextOffset;
   }
 
   throw new CodecMediaException("WAV data chunk not found");
@@ -166,11 +190,11 @@ function ascii(bytes, offset, length) {
   return Buffer.from(bytes).subarray(offset, offset + length).toString("ascii");
 }
 
-function readLeInt(bytes, offset) {
+function readLeUInt32(bytes, offset) {
   if (offset < 0 || offset + 4 > bytes.length) {
     throw new CodecMediaException("Unexpected end of WAV data");
   }
-  return Buffer.from(bytes).readInt32LE(offset);
+  return Buffer.from(bytes).readUInt32LE(offset);
 }
 
 function readLeU16(bytes, offset) {
